@@ -1,0 +1,30 @@
+{
+  "name": "stream-pdf-previewer",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "A Node.js streaming PDF viewer for huge local files and remote URLs.",
+  "main": "server/index.js",
+  "scripts": {
+    "start": "node server/index.js",
+    "dev": "node --watch server/index.js",
+    "test": "node --test --test-concurrency=1",
+    "sample": "node scripts/make-sample-pdf.mjs",
+    "sample:gb": "node scripts/make-gb-sample-pdf.mjs"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "keywords": [
+    "pdf",
+    "streaming",
+    "range-requests",
+    "pdfjs",
+    "node"
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "express": "^5.3.0",
+    "pdfjs-dist": "^5.7.284"
+  }
+}
