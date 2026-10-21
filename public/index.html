@@ -3,12 +3,13 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta name="color-scheme" content="dark" />
-    <meta name="theme-color" content="#0a0d13" />
+    <meta name="color-scheme" content="light" />
+    <meta name="theme-color" content="#ffffff" />
     <meta
       name="description"
-      content="StreamPDF —— 基于 Node.js 与 HTTP Range 的大文件流式 PDF 预览器。"
-    />    <title>StreamPDF · 大文件流式预览</title>
+      content="StreamPDF —— 通过 HTTP Range 按需预览网络 PDF 文档。"
+    />
+    <title>StreamPDF · 大文件流式预览</title>
     <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
     <link rel="stylesheet" href="/vendor/pdfjs/web/pdf_viewer.css" />
     <link rel="stylesheet" href="/styles.css" />
@@ -19,16 +20,15 @@
         <div class="topbar-left">
           <a class="brand" href="/" aria-label="StreamPDF 首页">
             <span class="brand-mark" aria-hidden="true">
-              <svg viewBox="0 0 32 32" fill="none">
-                <path d="M7 3.5h11.2L25 10.3v18.2H7z" fill="currentColor" opacity=".16" />
-                <path d="M7 3.5h11.2L25 10.3v18.2H7z" stroke="currentColor" stroke-width="1.5" />
-                <path d="M18.2 3.5v6.8H25" stroke="currentColor" stroke-width="1.5" />
-                <path d="M10.6 16.2h10.8M10.6 20h8.2M10.6 23.8h6" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" />
+              <svg viewBox="0 0 24 24" fill="none">
+                <path d="M6 3h7l5 5v13H6z" />
+                <path d="M13 3v5h5" />
+                <path d="M9 13h6M9 17h4" />
               </svg>
             </span>
             <span class="brand-copy">
               <strong>StreamPDF</strong>
-              <small>大文件流式预览</small>
+              <small>流式 PDF 预览</small>
             </span>
           </a>
         </div>
@@ -76,12 +76,12 @@
 
         <div class="topbar-right">
           <button class="icon-button" id="authButton" type="button" title="访问令牌" aria-label="设置访问令牌">
-            <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="8.5" cy="12" r="3.5" /><path d="M12 12h8M17 12v3M20 12v2" /></svg>
+            <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="10" width="14" height="10" rx="2" /><path d="M8.5 10V7.5a3.5 3.5 0 0 1 7 0V10M12 14v2" /></svg>
           </button>
           <button class="icon-button sidebar-toggle" id="toggleSidebar" type="button" title="显示/隐藏侧栏" aria-label="显示/隐藏侧栏" hidden>
             <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2" /><path d="M9 4v16" /></svg>
           </button>
-          <button class="button button-ghost" id="openButton" type="button">
+          <button class="button button-primary" id="openButton" type="button" aria-label="打开文档">
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14" /></svg>
             <span>打开文档</span>
           </button>
@@ -121,9 +121,7 @@
                 <span><b id="requestCount">0</b> 次分片请求</span>
                 <span>总量 <b id="docSizeShort">–</b></span>
               </div>
-              <p class="transfer-note">
-                只读取当前浏览所需字节，原文件不会被整体下载或载入内存。
-              </p>
+              <p class="transfer-note">仅读取当前浏览所需字节，不下载整个文件。</p>
             </section>
 
             <section class="outline-block">
@@ -144,17 +142,10 @@
 
         <section class="stage">
           <div class="landing" id="landing">
-            <div class="landing-grid" aria-hidden="true"></div>
-            <div class="landing-glow" aria-hidden="true"></div>
-
             <div class="hero">
               <div class="hero-copy">
-                <p class="eyebrow"><span aria-hidden="true"></span> STREAMING PDF VIEWER</p>
-                <h1>巨大的 PDF，<br /><em>边加载，边阅读。</em></h1>
-                <p class="hero-lede">
-                  输入 PDF 的网络地址。StreamPDF 只读取当前页面需要的字节，
-                  百页还是上千页，GB 级文档都可以快速打开。
-                </p>
+                <h1>打开 PDF 文档</h1>
+                <p class="hero-lede">输入 PDF 的 HTTP(S) 网络地址，按需加载页面数据。</p>
 
                 <div class="open-panel">
                   <form class="open-form" novalidate>
@@ -172,7 +163,7 @@
                         autocorrect="off"
                         spellcheck="false"
                       />
-                      <kbd class="field-enter" aria-hidden="true">↵</kbd>
+                      <kbd class="field-enter" aria-hidden="true">Enter</kbd>
                     </div>
                     <button class="open-submit" type="submit">
                       <span class="open-submit-label">打开文档</span>
@@ -198,59 +189,20 @@
                   </p>
                 </div>
               </div>
-
-              <div class="hero-art" aria-hidden="true">
-                <div class="art-ring ring-one"></div>
-                <div class="art-ring ring-two"></div>
-                <div class="sheet sheet-back"></div>
-                <div class="sheet sheet-mid"></div>
-                <div class="sheet sheet-front">
-                  <div class="sheet-head">
-                    <span class="pdf-pill">PDF</span>
-                    <span class="sheet-name">huge-book.pdf</span>
-                  </div>
-                  <div class="sheet-rule long"></div>
-                  <div class="sheet-rule"></div>
-                  <div class="sheet-rule short"></div>
-                  <div class="sheet-block">
-                    <span></span><span></span><span></span><span></span><span></span><span></span>
-                  </div>
-                  <div class="sheet-footer">
-                    <span>STREAMED ON DEMAND</span>
-                    <strong>1.84 GB</strong>
-                  </div>
-                </div>
-                <div class="float-chip chip-range"><i></i> Range 0–1 MiB</div>
-                <div class="float-chip chip-cache"><i></i> 已缓存 2.6 MB</div>
-                <div class="art-meter">
-                  <span class="art-meter-label">READING</span>
-                  <span class="art-meter-track"><i></i></span>
-                  <strong>0.3%</strong>
-                </div>
-              </div>
             </div>
 
             <div class="feature-row">
               <article>
-                <span class="feature-index">01</span>
-                <div>
-                  <h3>HTTP Range 分片</h3>
-                  <p>服务端按字节范围读取，PDF.js 只请求当前页所需的数据。</p>
-                </div>
+                <h3>HTTP Range 分片</h3>
+                <p>服务端按字节范围读取，PDF.js 只请求当前页所需的数据。</p>
               </article>
               <article>
-                <span class="feature-index">02</span>
-                <div>
-                  <h3>页面虚拟化</h3>
-                  <p>只为视口附近的页面创建画布，长文档滚动依旧轻量。</p>
-                </div>
+                <h3>页面虚拟化</h3>
+                <p>只为视口附近的页面创建画布，长文档滚动依旧轻量。</p>
               </article>
               <article>
-                <span class="feature-index">03</span>
-                <div>
-                  <h3>受控 URL 代理</h3>
-                  <p>服务端只代理公网 HTTP(S) 地址，阻断本机、内网与云元数据访问。</p>
-                </div>
+                <h3>受控 URL 代理</h3>
+                <p>服务端只代理公网 HTTP(S) 地址，阻断本机、内网访问。</p>
               </article>
             </div>
           </div>
@@ -287,10 +239,7 @@
     <dialog class="open-dialog" id="openDialog" aria-labelledby="openDialogTitle">
       <div class="dialog-panel">
         <div class="dialog-head">
-          <div>
-            <p class="dialog-kicker">OPEN DOCUMENT</p>
-            <h2 id="openDialogTitle">打开另一个文档</h2>
-          </div>
+          <h2 id="openDialogTitle">打开另一个文档</h2>
           <button class="dialog-close" type="button" aria-label="关闭对话框">
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18" /></svg>
           </button>
@@ -302,10 +251,7 @@
     <dialog class="open-dialog auth-dialog" id="authDialog" aria-labelledby="authDialogTitle">
       <div class="dialog-panel">
         <div class="dialog-head">
-          <div>
-            <p class="dialog-kicker">AUTHENTICATION</p>
-            <h2 id="authDialogTitle">输入访问令牌</h2>
-          </div>
+          <h2 id="authDialogTitle">输入访问令牌</h2>
           <button class="dialog-close" id="authDialogClose" type="button" aria-label="关闭对话框">
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18" /></svg>
           </button>
