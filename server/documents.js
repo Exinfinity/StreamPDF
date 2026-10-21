@@ -1,46 +1,101 @@
 import { randomUUID } from 'node:crypto';
 
 import { HttpError } from './errors.js';
-import { cleanupSource, inspectSource } from './sources.js';
+import { DEFAULT_REMOTE_POLICY } from './http-client.js';
+import { DEFAULT_MAX_REMOTE_BYTES, inspectSource } from './sources.js';
 
-const DEFAULT_TTL_MS = 12 * 60 * 60 * 1000;
+const DEFAULT_TTL_MS = 30 * 60 * 1000;
 const CLEANUP_INTERVAL_MS = 10 * 60 * 1000;
+const DEFAULT_MAX_DOCUMENTS = 100;
+const DEFAULT_MAX_DOCUMENTS_PER_IP = 5;
 
 export class DocumentStore {
-  constructor({ ttlMs = DEFAULT_TTL_MS, remoteMirrorLimit = 64 * 1024 * 1024 } = {}) {
+  constructor({
+    ttlMs = DEFAULT_TTL_MS,
+    maxDocuments = DEFAULT_MAX_DOCUMENTS,
+    maxDocumentsPerIp = DEFAULT_MAX_DOCUMENTS_PER_IP,
+    maxRemoteBytes = DEFAULT_MAX_REMOTE_BYTES,
+    remotePolicy = DEFAULT_REMOTE_POLICY,
+    remoteHeadersTimeoutMs,
+    remoteBodyIdleTimeoutMs,
+  } = {}) {
     this.docs = new Map();
     this.ttlMs = ttlMs;
-    this.remoteMirrorLimit = remoteMirrorLimit;
+    this.maxDocuments = maxDocuments;
+    this.maxDocumentsPerIp = maxDocumentsPerIp;
+    this.maxRemoteBytes = maxRemoteBytes;
+    this.remotePolicy = remotePolicy;
+    this.remoteHeadersTimeoutMs = remoteHeadersTimeoutMs;
+    this.remoteBodyIdleTimeoutMs = remoteBodyIdleTimeoutMs;
+    this.ipCounts = new Map();
+    this.pendingOpens = 0;
     this.cleanupTimer = setInterval(() => this.sweep(), CLEANUP_INTERVAL_MS);
     this.cleanupTimer.unref?.();
   }
 
-  async open({ source = 'auto', value }) {
-    const inspected = await inspectSource({
-      source,
-      value,
-      remoteMirrorLimit: this.remoteMirrorLimit,
-    });
+  async open({ value, ip = 'unknown' }) {
+    if (this.docs.size + this.pendingOpens >= this.maxDocuments) {
+      throw new HttpError(
+        503,
+        'MAX_DOCUMENTS_REACHED',
+        '服务器文档会话数量已达上限，请稍后重试。',
+      );
+    }
 
-    const now = Date.now();
-    const doc = {
-      ...inspected,
-      id: randomUUID(),
-      createdAt: now,
-      lastAccess: now,
-      stats: {
-        requests: 0,
-        rangeRequests: 0,
-        fullRequests: 0,
-        bytesServed: 0,
-        activeRequests: 0,
-        lastRange: null,
-        lastActivityAt: null,
-      },
-    };
+    const currentForIp = this.ipCounts.get(ip) ?? 0;
+    if (currentForIp >= this.maxDocumentsPerIp) {
+      throw new HttpError(
+        429,
+        'DOCUMENT_QUOTA_EXCEEDED',
+        '当前客户端的文档会话数量已达上限，请关闭部分文档后重试。',
+      );
+    }
 
-    this.docs.set(doc.id, doc);
-    return doc;
+    this.pendingOpens += 1;
+    this.ipCounts.set(ip, currentForIp + 1);
+
+    let success = false;
+    try {
+      const inspected = await inspectSource({
+        value,
+        policy: this.remotePolicy,
+        maxRemoteBytes: this.maxRemoteBytes,
+        headersTimeoutMs: this.remoteHeadersTimeoutMs,
+        bodyIdleTimeoutMs: this.remoteBodyIdleTimeoutMs,
+      });
+
+      const now = Date.now();
+      const doc = {
+        ...inspected,
+        id: randomUUID(),
+        ownerIp: ip,
+        createdAt: now,
+        lastAccess: now,
+        stats: {
+          requests: 0,
+          rangeRequests: 0,
+          fullRequests: 0,
+          bytesServed: 0,
+          activeRequests: 0,
+          lastRange: null,
+          lastActivityAt: null,
+        },
+      };
+
+      this.docs.set(doc.id, doc);
+      success = true;
+      return doc;
+    } finally {
+      this.pendingOpens -= 1;
+      if (!success) {
+        const remaining = (this.ipCounts.get(ip) ?? 1) - 1;
+        if (remaining <= 0) {
+          this.ipCounts.delete(ip);
+        } else {
+          this.ipCounts.set(ip, remaining);
+        }
+      }
+    }
   }
 
   get(id) {
@@ -71,14 +126,11 @@ export class DocumentStore {
     }
     this.docs.delete(id);
 
-    if (doc.cleanupDir) {
-      // Give an in-flight response a moment to finish before deleting the
-      // temporary mirror on platforms that lock open files.
-      const delay = doc.stats.activeRequests > 0 ? 30_000 : 0;
-      const timer = setTimeout(() => {
-        cleanupSource(doc).catch(() => {});
-      }, delay);
-      timer.unref?.();
+    const count = (this.ipCounts.get(doc.ownerIp) ?? 1) - 1;
+    if (count <= 0) {
+      this.ipCounts.delete(doc.ownerIp);
+    } else {
+      this.ipCounts.set(doc.ownerIp, count);
     }
     return true;
   }
@@ -89,11 +141,10 @@ export class DocumentStore {
       name: doc.name,
       size: doc.size,
       contentType: doc.contentType,
-      source: doc.kind === 'local' ? 'path' : 'url',
+      source: 'url',
       display: doc.display,
-      location: doc.kind === 'local' ? doc.path : doc.display,
-      mirrored: doc.mirrored === true,
-      rangeSupported: doc.mirrored !== true,
+      mirrored: false,
+      rangeSupported: true,
       contentUrl: `/api/documents/${doc.id}/content`,
       createdAt: new Date(doc.createdAt).toISOString(),
       lastModified: doc.lastModified ?? null,
@@ -143,6 +194,12 @@ export class DocumentStore {
         this.remove(id);
       }
     }
+  }
+
+  async cleanupAll() {
+    this.stop();
+    this.docs.clear();
+    this.ipCounts.clear();
   }
 
   stop() {

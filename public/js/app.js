@@ -9,10 +9,9 @@ const { EventBus, PDFViewer, PDFLinkService } = await import(
 
 const DEFAULT_CONFIG = Object.freeze({
   rangeChunkSize: 1024 * 1024,
-  remoteMirrorLimit: 64 * 1024 * 1024,
 });
 const RECENT_KEY = 'streampdf.recent.v1';
-const SOURCE_KEY = 'streampdf.source.v1';
+const AUTH_KEY = 'streampdf.auth.v1';
 const MAX_RECENT = 6;
 const MAX_OUTLINE_ITEMS = 2500;
 
@@ -25,11 +24,19 @@ const els = {
   toolbar: document.getElementById('toolbar'),
   sidebar: document.getElementById('sidebar'),
   openButton: document.getElementById('openButton'),
+  authButton: document.getElementById('authButton'),
   toggleSidebar: document.getElementById('toggleSidebar'),
   closeDocument: document.getElementById('closeDocument'),
   openDialog: document.getElementById('openDialog'),
   openDialogSlot: document.getElementById('openDialogSlot'),
   dialogClose: document.querySelector('.dialog-close'),
+  authDialog: document.getElementById('authDialog'),
+  authForm: document.getElementById('authForm'),
+  authTokenInput: document.getElementById('authTokenInput'),
+  authError: document.getElementById('authError'),
+  authDialogClose: document.getElementById('authDialogClose'),
+  authForget: document.getElementById('authForget'),
+  authSpinner: document.getElementById('authSpinner'),
   pageNumber: document.getElementById('pageNumber'),
   pageCount: document.getElementById('pageCount'),
   prevPage: document.getElementById('prevPage'),
@@ -80,6 +87,7 @@ const state = {
   statsFetching: false,
   toastTimer: null,
   overlayAction: null,
+  memoryToken: '',
 };
 
 const eventBus = new EventBus();
@@ -103,24 +111,159 @@ linkService.setViewer(pdfViewer);
 init();
 
 function init() {
+  initAuth();
   initOpenPanels();
   renderRecent();
   bindViewerEvents();
   bindUiEvents();
-  loadConfig();
 
-  const params = new URLSearchParams(window.location.search);
-  const autoUrl = params.get('url');
-  const autoPath = params.get('path') || params.get('file');
-  const autoOpen = params.get('open');
-  if (autoUrl) {
-    window.setTimeout(() => openDocument('url', autoUrl), 0);
-  } else if (autoPath) {
-    window.setTimeout(() => openDocument('path', autoPath), 0);
-  } else if (autoOpen) {
-    const source = /^https?:\/\//i.test(autoOpen) ? 'url' : 'path';
-    window.setTimeout(() => openDocument(source, autoOpen), 0);
+  if (getAuthToken()) {
+    loadConfig();
+  } else {
+    window.setTimeout(() => showAuthDialog(), 0);
   }
+}
+
+/* ------------------------------------------------------------------- Auth */
+
+function getAuthToken() {
+  try {
+    const stored = sessionStorage.getItem(AUTH_KEY);
+    if (stored) {
+      return stored;
+    }
+  } catch {
+    // Fall back to the in-memory token when storage is disabled.
+  }
+  return state.memoryToken;
+}
+
+function setAuthToken(token) {
+  state.memoryToken = token;
+  try {
+    sessionStorage.setItem(AUTH_KEY, token);
+  } catch {
+    // The in-memory token still protects the current page session.
+  }
+}
+
+function clearAuthToken() {
+  state.memoryToken = '';
+  try {
+    sessionStorage.removeItem(AUTH_KEY);
+  } catch {
+    // Ignore storage failures.
+  }
+}
+
+function authHeaders() {
+  const token = getAuthToken();
+  return token ? { Authorization: `Bearer ${token}` } : {};
+}
+
+function initAuth() {
+  els.authForm.addEventListener('submit', (event) => {
+    event.preventDefault();
+    void submitAuthToken();
+  });
+
+  els.authButton.addEventListener('click', () => showAuthDialog());
+
+  els.authForget.addEventListener('click', () => {
+    clearAuthToken();
+    els.authTokenInput.value = '';
+    els.authError.hidden = true;
+    els.authTokenInput.focus();
+  });
+
+  els.authDialogClose.addEventListener('click', () => {
+    if (getAuthToken()) {
+      els.authDialog.close();
+    } else {
+      els.authTokenInput.focus();
+    }
+  });
+
+  els.authDialog.addEventListener('cancel', (event) => {
+    if (!getAuthToken()) {
+      event.preventDefault();
+    }
+  });
+}
+
+async function submitAuthToken() {
+  const token = els.authTokenInput.value.trim();
+  if (token.length < 16) {
+    showAuthError('访问令牌至少需要 16 个字符。');
+    return;
+  }
+
+  const submit = els.authForm.querySelector('button[type="submit"]');
+  submit.disabled = true;
+  els.authSpinner.hidden = false;
+
+  try {
+    const response = await fetch('/api/config', {
+      headers: { Authorization: `Bearer ${token}` },
+      cache: 'no-store',
+    });
+    if (!response.ok) {
+      showAuthError(
+        response.status === 401 ? '访问令牌无效。' : `验证访问令牌失败（HTTP ${response.status}）。`,
+      );
+      return;
+    }
+
+    const config = await response.json().catch(() => null);
+    setAuthToken(token);
+    els.authError.hidden = true;
+    els.authDialog.close();
+    applyConfig(config);
+    if (!state.current) {
+      focusLandingInput();
+    }
+  } catch {
+    showAuthError('无法连接后端服务，请确认服务已启动。');
+  } finally {
+    submit.disabled = false;
+    els.authSpinner.hidden = true;
+  }
+}
+
+function showAuthDialog(message = '') {
+  if (message) {
+    showAuthError(message);
+  } else {
+    els.authError.hidden = true;
+  }
+  els.authTokenInput.value = getAuthToken();
+  if (!els.authDialog.open) {
+    els.authDialog.showModal();
+  }
+  window.setTimeout(() => els.authTokenInput.focus(), 30);
+}
+
+function showAuthError(message) {
+  els.authError.textContent = message;
+  els.authError.hidden = false;
+}
+
+function handleAuthFailure() {
+  clearAuthToken();
+  showAuthDialog('访问令牌无效或已失效，请重新输入。');
+}
+
+async function apiFetch(input, init = {}) {
+  const headers = new Headers(init.headers ?? {});
+  for (const [name, value] of Object.entries(authHeaders())) {
+    headers.set(name, value);
+  }
+
+  const response = await fetch(input, { ...init, headers });
+  if (response.status === 401) {
+    handleAuthFailure();
+  }
+  return response;
 }
 
 /* ------------------------------------------------------------------ Viewer */
@@ -240,59 +383,29 @@ function initOpenPanels() {
   const dialogPanel = landingPanel.cloneNode(true);
   els.openDialogSlot.append(dialogPanel);
 
-  let savedSource = 'path';
-  try {
-    const stored = localStorage.getItem(SOURCE_KEY);
-    if (stored === 'path' || stored === 'url') {
-      savedSource = stored;
-    }
-  } catch {
-    // Storage may be disabled; the default tab still works.
-  }
-
   for (const panel of document.querySelectorAll('.open-panel')) {
-    panel._sourceValues = { path: '', url: '' };
-    applyPanelSource(panel, savedSource);
-    panel.querySelector('.source-input')?.addEventListener('input', (event) => {
+    panel.querySelector('.source-input')?.addEventListener('input', () => {
       clearFormError(panel);
-      panel._sourceValues[panel.dataset.source] = event.target.value;
     });
   }
 }
 
 function bindUiEvents() {
   document.addEventListener('click', (event) => {
-    const tab = event.target.closest('.source-tab');
-    if (tab) {
-      const panel = tab.closest('.open-panel');
-      if (panel && panel.dataset.busy !== '1') {
-        const previous = panel.dataset.source;
-        const input = panel.querySelector('.source-input');
-        panel._sourceValues[previous] = input.value;
-        applyPanelSource(panel, tab.dataset.source);
-        input.value = panel._sourceValues[tab.dataset.source] ?? '';
-        input.focus();
-      }
-      return;
-    }
-
     const recent = event.target.closest('.recent-item');
     if (recent) {
       const panel = recent.closest('.open-panel');
       if (panel?.dataset.busy === '1') {
         return;
       }
-      const source = recent.dataset.source;
       const value = recent.dataset.value;
-      if (source && value) {
+      if (value) {
         if (panel) {
-          applyPanelSource(panel, source);
           const input = panel.querySelector('.source-input');
           input.value = value;
-          panel._sourceValues[source] = value;
           clearFormError(panel);
         }
-        openDocument(source, value, panel);
+        openDocument(value, panel);
       }
       return;
     }
@@ -314,19 +427,18 @@ function bindUiEvents() {
       return;
     }
     const input = form.querySelector('.source-input');
-    const source = panel.dataset.source || 'path';
     const value = input.value.trim();
     if (!value) {
-      showFormError(panel, '请输入本地 PDF 路径或网络 URL。');
+      showFormError(panel, '请输入 PDF 的 HTTP(S) URL。');
       input.focus();
       return;
     }
-    if (source === 'url' && !/^https?:\/\//i.test(value)) {
+    if (!/^https?:\/\//i.test(value)) {
       showFormError(panel, 'URL 需要以 http:// 或 https:// 开头。');
       input.focus();
       return;
     }
-    openDocument(source, value, panel);
+    openDocument(value, panel);
   });
 
   els.openButton.addEventListener('click', () => {
@@ -423,7 +535,7 @@ function bindUiEvents() {
     }
 
     if (event.key === 'Escape') {
-      if (els.openDialog.open) {
+      if (els.openDialog.open || els.authDialog.open) {
         return;
       }
       if (window.matchMedia('(max-width: 900px)').matches) {
@@ -436,29 +548,6 @@ function bindUiEvents() {
   window.addEventListener('beforeunload', () => {
     stopStatsPolling();
   });
-}
-
-function applyPanelSource(panel, source) {
-  const next = source === 'url' ? 'url' : 'path';
-  panel.dataset.source = next;
-  for (const tab of panel.querySelectorAll('.source-tab')) {
-    const active = tab.dataset.source === next;
-    tab.classList.toggle('is-active', active);
-    tab.setAttribute('aria-selected', String(active));
-  }
-  const input = panel.querySelector('.source-input');
-  if (input) {
-    input.placeholder =
-      next === 'url'
-        ? 'https://example.com/book.pdf'
-        : '输入本地 PDF 路径，例如 /data/books/manual.pdf';
-    input.setAttribute('aria-label', next === 'url' ? 'PDF 网络 URL' : 'PDF 本地文件路径');
-  }
-  try {
-    localStorage.setItem(SOURCE_KEY, next);
-  } catch {
-    // Ignore storage failures.
-  }
 }
 
 function focusLandingInput() {
@@ -501,9 +590,6 @@ function setAllFormsBusy(busy) {
     if (spinner) {
       spinner.hidden = !busy;
     }
-    for (const tab of panel.querySelectorAll('.source-tab')) {
-      tab.disabled = busy;
-    }
   }
   els.openButton.disabled = busy;
 }
@@ -542,14 +628,18 @@ function clearAllFormErrors() {
 
 /* ------------------------------------------------------------- Open document */
 
-async function openDocument(source, value, panel = null) {
+async function openDocument(value, panel = null) {
   if (state.opening) {
     return;
   }
 
   const trimmed = String(value ?? '').trim();
   if (!trimmed) {
-    showFormError(panel, '请输入本地 PDF 路径或网络 URL。');
+    showFormError(panel, '请输入 PDF 的 HTTP(S) URL。');
+    return;
+  }
+  if (!/^https?:\/\//i.test(trimmed)) {
+    showFormError(panel, 'URL 需要以 http:// 或 https:// 开头。');
     return;
   }
 
@@ -560,7 +650,7 @@ async function openDocument(source, value, panel = null) {
 
   let meta = null;
   try {
-    meta = await createDocument(source, trimmed);
+    meta = await createDocument(trimmed);
     if (seq !== state.openSeq) {
       void deleteServerDocument(meta.id);
       return;
@@ -590,21 +680,16 @@ async function openDocument(source, value, panel = null) {
     }
 
     addRecent({
-      source: meta.source,
       value: trimmed,
       name: meta.name,
       size: meta.size,
     });
-
-    if (meta.mirrored) {
-      showToast(
-        `该 URL 不支持 Range，已镜像 ${formatBytes(meta.size)} 到服务器临时文件后打开。`,
-        'info',
-      );
-    }
   } catch (error) {
     if (seq !== state.openSeq) {
       return;
+    }
+    if (isAuthError(error)) {
+      handleAuthFailure();
     }
     if (!meta) {
       showFormError(panel, error);
@@ -619,13 +704,13 @@ async function openDocument(source, value, panel = null) {
   }
 }
 
-async function createDocument(source, value) {
+async function createDocument(value) {
   let response;
   try {
-    response = await fetch('/api/documents', {
+    response = await apiFetch('/api/documents', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ source, value }),
+      body: JSON.stringify({ source: 'url', value }),
     });
   } catch {
     throw new ApiError({
@@ -655,6 +740,7 @@ async function loadPdfDocument(meta, seq) {
 
   const loadingTask = pdfjsLib.getDocument({
     url: new URL(meta.contentUrl, window.location.href).href,
+    httpHeaders: authHeaders(),
     cMapUrl: '/vendor/pdfjs/cmaps/',
     cMapPacked: true,
     standardFontDataUrl: '/vendor/pdfjs/standard_fonts/',
@@ -663,6 +749,7 @@ async function loadPdfDocument(meta, seq) {
     rangeChunkSize: state.config.rangeChunkSize,
     disableAutoFetch: true,
     disableStream: true,
+    enableScripting: false,
     enableXfa: false,
   });
   current.loadingTask = loadingTask;
@@ -813,7 +900,12 @@ async function loadOutline(pdf) {
           }
           try {
             if (item.url) {
-              window.open(item.url, '_blank', 'noopener,noreferrer');
+              const target = safeOutlineUrl(item.url);
+              if (!target) {
+                showToast('该书签链接被拒绝。', 'error');
+                return;
+              }
+              window.open(target, '_blank', 'noopener,noreferrer');
             } else if (item.dest) {
               await linkService.goToDestination(item.dest);
             }
@@ -846,8 +938,22 @@ async function loadOutline(pdf) {
   }
 }
 
-function setOutlineMessage(message) {
-  const p = document.createElement('p');
+function safeOutlineUrl(raw) {
+  if (typeof raw !== 'string') {
+    return null;
+  }
+  try {
+    const url = new URL(raw, window.location.href);
+    if (!['http:', 'https:', 'mailto:'].includes(url.protocol)) {
+      return null;
+    }
+    return url.href;
+  } catch {
+    return null;
+  }
+}
+
+function setOutlineMessage(message) {  const p = document.createElement('p');
   p.className = 'outline-empty';
   p.textContent = message;
   els.outlineList.replaceChildren(p);
@@ -865,8 +971,8 @@ function showDocumentView(meta) {
 
   els.docName.textContent = meta.name;
   els.docName.title = meta.name;
-  els.docLocation.textContent = meta.location;
-  els.docLocation.title = meta.location;
+  els.docLocation.textContent = meta.display;
+  els.docLocation.title = meta.display;
   els.docSize.textContent = formatBytes(meta.size);
   els.docSizeShort.textContent = formatBytes(meta.size);
   els.docPages.textContent = '–';
@@ -994,7 +1100,7 @@ function startStatsPolling(meta) {
     }
     state.statsFetching = true;
     try {
-      const response = await fetch(`/api/documents/${encodeURIComponent(meta.id)}/stats`, {
+      const response = await apiFetch(`/api/documents/${encodeURIComponent(meta.id)}/stats`, {
         signal: state.statsAbort.signal,
         cache: 'no-store',
       });
@@ -1106,9 +1212,9 @@ function readRecent() {
       .filter(
         (entry) =>
           entry &&
-          (entry.source === 'path' || entry.source === 'url') &&
+          (entry.source === undefined || entry.source === 'url') &&
           typeof entry.value === 'string' &&
-          entry.value,
+          /^https?:\/\//i.test(entry.value),
       )
       .slice(0, MAX_RECENT);
   } catch {
@@ -1117,11 +1223,9 @@ function readRecent() {
 }
 
 function addRecent(entry) {
-  const recent = readRecent().filter(
-    (item) => !(item.source === entry.source && item.value === entry.value),
-  );
+  const recent = readRecent().filter((item) => item.value !== entry.value);
   recent.unshift({
-    source: entry.source,
+    source: 'url',
     value: entry.value,
     name: entry.name,
     size: entry.size,
@@ -1163,16 +1267,13 @@ function renderRecent() {
       const button = document.createElement('button');
       button.type = 'button';
       button.className = 'recent-item';
-      button.dataset.source = entry.source;
       button.dataset.value = entry.value;
       button.title = entry.value;
 
       const icon = document.createElement('span');
       icon.className = 'recent-icon';
       icon.innerHTML =
-        entry.source === 'url'
-          ? '<svg viewBox="0 0 24 24"><path d="M10 14a4 4 0 0 0 5.7 0l2.6-2.6a4 4 0 0 0-5.7-5.7L11 7.3"/><path d="M14 10a4 4 0 0 0-5.7 0l-2.6 2.6a4 4 0 1 0 5.7 5.7l1.6-1.6"/></svg>'
-          : '<svg viewBox="0 0 24 24"><path d="M3.5 7.5h6l2 2h9v9.5a1.5 1.5 0 0 1-1.5 1.5H5A1.5 1.5 0 0 1 3.5 19z"/><path d="M3.5 7.5V5.8A1.3 1.3 0 0 1 4.8 4.5h4.3l2 2h7.1a1.3 1.3 0 0 1 1.3 1.3v1.7"/></svg>';
+        '<svg viewBox="0 0 24 24"><path d="M10 14a4 4 0 0 0 5.7 0l2.6-2.6a4 4 0 0 0-5.7-5.7L11 7.3"/><path d="M14 10a4 4 0 0 0-5.7 0l-2.6 2.6a4 4 0 1 0 5.7 5.7l1.6-1.6"/></svg>';
 
       const copy = document.createElement('span');
       copy.className = 'recent-copy';
@@ -1184,7 +1285,7 @@ function renderRecent() {
 
       const meta = document.createElement('span');
       meta.className = 'recent-meta';
-      meta.textContent = entry.size ? formatBytes(entry.size) : entry.source === 'url' ? 'URL' : '';
+      meta.textContent = entry.size ? formatBytes(entry.size) : 'URL';
 
       button.append(icon, copy, meta);
       fragment.append(button);
@@ -1216,6 +1317,9 @@ function toUserMessage(error) {
   if (error instanceof ApiError) {
     return [error.message, error.hint].filter(Boolean).join(' ');
   }
+  if (isAuthError(error)) {
+    return '访问令牌无效或已失效，请重新输入。';
+  }
   if (error?.name === 'PasswordException') {
     return '此 PDF 需要密码，但密码输入被取消。';
   }
@@ -1234,30 +1338,42 @@ function toUserMessage(error) {
   return error?.message || '发生未知错误。';
 }
 
+function isAuthError(error) {
+  if (!error) {
+    return false;
+  }
+  if (error.status === 401) {
+    return true;
+  }
+  if (error.code === 'UNAUTHORIZED') {
+    return true;
+  }
+  return error.name === 'UnexpectedResponseException' && /\(401\)/.test(error.message || '');
+}
+
+function applyConfig(config) {
+  if (Number.isFinite(config?.rangeChunkSize) && config.rangeChunkSize > 0) {
+    state.config.rangeChunkSize = config.rangeChunkSize;
+    els.chunkSize.textContent = formatChunkSize(config.rangeChunkSize);
+  }
+}
+
 async function loadConfig() {
   try {
-    const response = await fetch('/api/config', { cache: 'no-store' });
+    const response = await apiFetch('/api/config', { cache: 'no-store' });
     if (!response.ok) {
-      return;
+      return false;
     }
-    const config = await response.json();
-    if (Number.isFinite(config?.rangeChunkSize) && config.rangeChunkSize > 0) {
-      state.config.rangeChunkSize = config.rangeChunkSize;
-      els.chunkSize.textContent = formatChunkSize(config.rangeChunkSize);
-    }
-    if (Number.isFinite(config?.remoteMirrorLimit) && config.remoteMirrorLimit > 0) {
-      state.config.remoteMirrorLimit = config.remoteMirrorLimit;
-    }
+    applyConfig(await response.json());
+    return true;
   } catch {
     // Defaults are enough to start.
+    return false;
   }
 }
 
 function sourceLabel(meta) {
-  if (meta.source === 'url') {
-    return meta.mirrored ? '网络 URL · 已镜像' : '网络 URL';
-  }
-  return '本地文件';
+  return '网络 URL';
 }
 
 function formatBytes(bytes) {
@@ -1303,7 +1419,7 @@ function formatPercent(value) {
 }
 
 function deleteServerDocument(id) {
-  return fetch(`/api/documents/${encodeURIComponent(id)}`, {
+  return apiFetch(`/api/documents/${encodeURIComponent(id)}`, {
     method: 'DELETE',
     keepalive: true,
   }).catch(() => {});

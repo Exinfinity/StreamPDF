@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "private": true,
   "type": "module",
-  "description": "A Node.js streaming PDF viewer for huge local files and remote URLs.",
+  "description": "A Node.js streaming PDF viewer for huge remote PDFs.",
   "main": "server/index.js",
   "scripts": {
     "start": "node server/index.js",
@@ -13,7 +13,7 @@
     "sample:gb": "node scripts/make-gb-sample-pdf.mjs"
   },
   "engines": {
-    "node": ">=20.0.0"
+    "node": ">=22.13.0"
   },
   "keywords": [
     "pdf",
@@ -25,6 +25,7 @@
   "license": "MIT",
   "dependencies": {
     "express": "^5.3.0",
-    "pdfjs-dist": "^5.7.284"
+    "ipaddr.js": "^2.5.0",
+    "pdfjs-dist": "^6.4.299"
   }
 }

@@ -8,8 +8,7 @@
     <meta
       name="description"
       content="StreamPDF —— 基于 Node.js 与 HTTP Range 的大文件流式 PDF 预览器。"
-    />
-    <title>StreamPDF · 大文件流式预览</title>
+    />    <title>StreamPDF · 大文件流式预览</title>
     <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
     <link rel="stylesheet" href="/vendor/pdfjs/web/pdf_viewer.css" />
     <link rel="stylesheet" href="/styles.css" />
@@ -76,6 +75,9 @@
         </div>
 
         <div class="topbar-right">
+          <button class="icon-button" id="authButton" type="button" title="访问令牌" aria-label="设置访问令牌">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="8.5" cy="12" r="3.5" /><path d="M12 12h8M17 12v3M20 12v2" /></svg>
+          </button>
           <button class="icon-button sidebar-toggle" id="toggleSidebar" type="button" title="显示/隐藏侧栏" aria-label="显示/隐藏侧栏" hidden>
             <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2" /><path d="M9 4v16" /></svg>
           </button>
@@ -150,30 +152,21 @@
                 <p class="eyebrow"><span aria-hidden="true"></span> STREAMING PDF VIEWER</p>
                 <h1>巨大的 PDF，<br /><em>边加载，边阅读。</em></h1>
                 <p class="hero-lede">
-                  输入本地文件路径或网络地址。StreamPDF 只读取当前页面需要的字节，
+                  输入 PDF 的网络地址。StreamPDF 只读取当前页面需要的字节，
                   百页还是上千页，GB 级文档都可以快速打开。
                 </p>
 
                 <div class="open-panel">
-                  <div class="source-tabs" role="tablist" aria-label="文档来源">
-                    <button class="source-tab is-active" type="button" data-source="path" role="tab" aria-selected="true">
-                      本地文件路径
-                    </button>
-                    <button class="source-tab" type="button" data-source="url" role="tab" aria-selected="false">
-                      网络 URL
-                    </button>
-                  </div>
-
                   <form class="open-form" novalidate>
                     <div class="source-field">
                       <span class="field-icon" aria-hidden="true">
-                        <svg class="icon-path" viewBox="0 0 24 24"><path d="M3.5 7.5h6l2 2h9v9.5a1.5 1.5 0 0 1-1.5 1.5H5A1.5 1.5 0 0 1 3.5 19z" /><path d="M3.5 7.5V5.8A1.3 1.3 0 0 1 4.8 4.5h4.3l2 2h7.1a1.3 1.3 0 0 1 1.3 1.3v1.7" /></svg>
                         <svg class="icon-url" viewBox="0 0 24 24"><path d="M10 14a4 4 0 0 0 5.7 0l2.6-2.6a4 4 0 0 0-5.7-5.7L11 7.3" /><path d="M14 10a4 4 0 0 0-5.7 0l-2.6 2.6a4 4 0 1 0 5.7 5.7l1.6-1.6" /></svg>
                       </span>
                       <input
                         class="source-input"
                         type="text"
-                        aria-label="PDF 本地路径或网络 URL"
+                        aria-label="PDF 网络 URL"
+                        placeholder="https://example.com/book.pdf"
                         autocomplete="off"
                         autocapitalize="off"
                         autocorrect="off"
@@ -199,7 +192,7 @@
 
                   <p class="open-hint">
                     <span>支持</span>
-                    绝对路径、<code>~/</code> 路径、HTTP(S) PDF 直链
+                    HTTP(S) PDF 直链
                     <span class="hint-sep">·</span>
                     自动识别大小与分片
                   </p>
@@ -255,8 +248,8 @@
               <article>
                 <span class="feature-index">03</span>
                 <div>
-                  <h3>本地与远端</h3>
-                  <p>本地路径零拷贝读取；远端 URL 由 Node 代理 Range 请求。</p>
+                  <h3>受控 URL 代理</h3>
+                  <p>服务端只代理公网 HTTP(S) 地址，阻断本机、内网与云元数据访问。</p>
                 </div>
               </article>
             </div>
@@ -303,6 +296,44 @@
           </button>
         </div>
         <div id="openDialogSlot"></div>
+      </div>
+    </dialog>
+
+    <dialog class="open-dialog auth-dialog" id="authDialog" aria-labelledby="authDialogTitle">
+      <div class="dialog-panel">
+        <div class="dialog-head">
+          <div>
+            <p class="dialog-kicker">AUTHENTICATION</p>
+            <h2 id="authDialogTitle">输入访问令牌</h2>
+          </div>
+          <button class="dialog-close" id="authDialogClose" type="button" aria-label="关闭对话框">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18" /></svg>
+          </button>
+        </div>
+        <form class="auth-form" id="authForm" novalidate>
+          <p class="auth-help">
+            请输入服务启动时终端输出的访问令牌，或管理员通过 <code>AUTH_TOKEN</code> 配置的令牌。
+            令牌只保存在当前浏览器会话中。
+          </p>
+          <label class="auth-field">
+            <span>访问令牌</span>
+            <input
+              id="authTokenInput"
+              type="password"
+              autocomplete="current-password"
+              spellcheck="false"
+              required
+            />
+          </label>
+          <p class="form-error" id="authError" role="alert" hidden></p>
+          <div class="auth-actions">
+            <button class="open-submit" type="submit">
+              <span class="open-submit-label">进入</span>
+              <span class="button-spinner" id="authSpinner" hidden aria-hidden="true"></span>
+            </button>
+            <button class="button button-ghost" id="authForget" type="button">清除已保存令牌</button>
+          </div>
+        </form>
       </div>
     </dialog>
 

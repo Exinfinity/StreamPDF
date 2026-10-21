@@ -9,14 +9,13 @@ import { createApp } from '../server/app.js';
 
 const WORK_DIR = path.resolve('test-output', `integration-${process.pid}`);
 const PDF_SIZE = 3 * 1024 * 1024 + 321;
+const AUTH_TOKEN = 'test-access-token-0123456789';
 
-let localServer;
-let remoteServer;
-let baseUrl;
-let store;
+let remote;
 let payload;
-let localPdfPath;
-let notPdfPath;
+let main;
+let secure;
+const extraContexts = [];
 
 test.before(async () => {
   await fsp.mkdir(WORK_DIR, { recursive: true });
@@ -25,165 +24,495 @@ test.before(async () => {
   payload.write('StreamPDF integration fixture\n', 11, 'latin1');
   payload.write('%%EOF\n', PDF_SIZE - 6, 'latin1');
 
-  localPdfPath = path.join(WORK_DIR, 'fixture.pdf');
-  notPdfPath = path.join(WORK_DIR, 'not-a-pdf.txt');
-  await fsp.writeFile(localPdfPath, payload);
-  await fsp.writeFile(notPdfPath, 'this is not a pdf');
-
-  remoteServer = await startRemoteFixture(payload);
-  const created = createApp({ remoteMirrorLimit: 5 * 1024 * 1024 });
-  store = created.store;
-  localServer = created.app.listen(0, '127.0.0.1');
-  await once(localServer, 'listening');
-  baseUrl = `http://127.0.0.1:${localServer.address().port}`;
+  remote = await startRemoteFixture(payload);
+  main = await startApp({
+    allowPrivateAddresses: true,
+    allowedRemotePorts: [remote.port],
+    documentRateLimit: false,
+    contentRateLimit: false,
+    deleteRateLimit: false,
+  });
+  secure = await startApp({
+    documentRateLimit: false,
+    contentRateLimit: false,
+    deleteRateLimit: false,
+  });
 });
 
 test.after(async () => {
-  store?.stop();
-  await closeServer(localServer);
-  await closeServer(remoteServer?.server);
+  for (const context of [main, secure, ...extraContexts]) {
+    await context?.cleanup();
+  }
+  await closeServer(remote?.server);
   await fsp.rm(WORK_DIR, { recursive: true, force: true });
 });
 
-test('opens a local PDF and serves exact byte ranges', async () => {
-  const created = await api('/api/documents', {
+/* --------------------------------------------------------------- Authentication */
+
+test('requires a bearer token for every document API', async () => {
+  const health = await fetch(`${main.baseUrl}/api/health`);
+  assert.equal(health.status, 200);
+  assert.deepEqual(await health.json(), { ok: true });
+
+  const configNoAuth = await api(main, '/api/config', { token: null });
+  assert.equal(configNoAuth.status, 401);
+  assert.match(configNoAuth.headers.get('www-authenticate') || '', /Bearer/);
+
+  const configWrong = await api(main, '/api/config', { token: 'wrong-token-1234567890' });
+  assert.equal(configWrong.status, 401);
+
+  const createNoAuth = await api(main, '/api/documents', {
     method: 'POST',
-    body: { source: 'path', value: localPdfPath },
+    token: null,
+    body: { source: 'url', value: `http://127.0.0.1:${remote.port}/range.pdf` },
+  });
+  assert.equal(createNoAuth.status, 401);
+  assert.equal(createNoAuth.body.error.code, 'UNAUTHORIZED');
+
+  const configOk = await api(main, '/api/config');
+  assert.equal(configOk.status, 200);
+  assert.ok(configOk.body.rangeChunkSize > 0);
+  assert.equal('remoteMirrorLimit' in configOk.body, false);
+});
+
+test('rate limits repeated failed authentication attempts', async () => {
+  const context = await startApp({
+    authFailureRateLimit: { windowMs: 60_000, max: 2 },
+    documentRateLimit: false,
+    contentRateLimit: false,
+    deleteRateLimit: false,
+  });
+  extraContexts.push(context);
+
+  for (let index = 0; index < 2; index += 1) {
+    const response = await api(context, '/api/config', { token: 'wrong-token-1234567890' });
+    assert.equal(response.status, 401);
+  }
+
+  const limited = await api(context, '/api/config', { token: 'wrong-token-1234567890' });
+  assert.equal(limited.status, 429);
+  assert.equal(limited.body.error.code, 'RATE_LIMITED');
+  assert.ok(Number(limited.headers.get('retry-after')) >= 1);
+});
+
+/* ------------------------------------------------------------------ P0-1 LFI */
+
+test('removes server-side path reads entirely', async () => {
+  const pathSource = await api(main, '/api/documents', {
+    method: 'POST',
+    body: { source: 'path', value: '/etc/passwd' },
+  });
+  assert.equal(pathSource.status, 403);
+  assert.equal(pathSource.body.error.code, 'LOCAL_FILES_DISABLED');
+
+  const autoSource = await api(main, '/api/documents', {
+    method: 'POST',
+    body: { source: 'auto', value: '/etc/passwd' },
+  });
+  assert.equal(autoSource.status, 400);
+  assert.equal(autoSource.body.error.code, 'INVALID_SOURCE');
+
+  const plainPath = await api(main, '/api/documents', {
+    method: 'POST',
+    body: { source: 'url', value: '/etc/passwd' },
+  });
+  assert.equal(plainPath.status, 400);
+  assert.equal(plainPath.body.error.code, 'INVALID_URL');
+});
+
+/* ------------------------------------------------------------------ P0-2 SSRF */
+
+test('blocks loopback, private, link-local and cloud metadata targets', async () => {
+  const blocked = [
+    'http://127.0.0.1/',
+    'http://localhost/',
+    'http://[::1]/',
+    'http://169.254.169.254/latest/meta-data/',
+    'http://100.100.100.200/latest/meta-data/',
+    'http://10.0.0.1/',
+    'http://172.16.0.1/',
+    'http://192.168.1.1/',
+    'http://2130706433/',
+    'http://0x7f000001/',
+    'http://[::ffff:127.0.0.1]/',
+    'http://[64:ff9b::7f00:1]/',
+    'http://[2002:7f00:1::]/',
+  ];
+
+  for (const value of blocked) {
+    const response = await api(secure, '/api/documents', {
+      method: 'POST',
+      body: { source: 'url', value },
+    });
+    assert.equal(response.status, 403, `${value} should be blocked`);
+    assert.equal(response.body.error.code, 'REMOTE_ADDRESS_BLOCKED', value);
+  }
+});
+
+test('rejects disallowed ports, embedded credentials and unsafe schemes', async () => {
+  const port = await api(secure, '/api/documents', {
+    method: 'POST',
+    body: { source: 'url', value: 'http://example.com:8080/book.pdf' },
+  });
+  assert.equal(port.status, 403);
+  assert.equal(port.body.error.code, 'URL_PORT_NOT_ALLOWED');
+
+  const credentials = await api(secure, '/api/documents', {
+    method: 'POST',
+    body: { source: 'url', value: 'http://user:pass@example.com/book.pdf' },
+  });
+  assert.equal(credentials.status, 400);
+  assert.equal(credentials.body.error.code, 'URL_CREDENTIALS_NOT_ALLOWED');
+
+  for (const value of ['file:///etc/passwd', 'ftp://example.com/book.pdf', 'gopher://example.com/']) {
+    const response = await api(secure, '/api/documents', {
+      method: 'POST',
+      body: { source: 'url', value },
+    });
+    assert.equal(response.status, 400, value);
+    assert.equal(response.body.error.code, 'INVALID_URL_PROTOCOL', value);
+  }
+});
+
+test('revalidates every redirect hop', async () => {
+  const toFile = await api(main, '/api/documents', {
+    method: 'POST',
+    body: { source: 'url', value: `${remote.origin}/redirect-file` },
+  });
+  assert.equal(toFile.status, 400);
+  assert.equal(toFile.body.error.code, 'INVALID_URL_PROTOCOL');
+
+  const loop = await api(main, '/api/documents', {
+    method: 'POST',
+    body: { source: 'url', value: `${remote.origin}/redirect-loop` },
+  });
+  assert.equal(loop.status, 502);
+  assert.equal(loop.body.error.code, 'REMOTE_TOO_MANY_REDIRECTS');
+
+  const safeRedirect = await api(main, '/api/documents', {
+    method: 'POST',
+    body: { source: 'url', value: `${remote.origin}/redirect-range` },
+  });
+  assert.equal(safeRedirect.status, 201);
+  assert.equal(safeRedirect.body.document.size, PDF_SIZE);
+  await api(main, `/api/documents/${safeRedirect.body.document.id}`, { method: 'DELETE' });
+});
+
+/* --------------------------------------------------------- Remote streaming */
+
+test('opens a remote PDF and serves exact byte ranges', async () => {
+  const created = await api(main, '/api/documents', {
+    method: 'POST',
+    body: { source: 'url', value: remote.rangeUrl },
   });
   assert.equal(created.status, 201);
   const doc = created.body.document;
-  assert.equal(doc.source, 'path');
+  assert.equal(doc.source, 'url');
   assert.equal(doc.size, PDF_SIZE);
   assert.equal(doc.rangeSupported, true);
+  assert.equal('location' in doc, false);
+  assert.equal(JSON.stringify(doc).includes(WORK_DIR), false);
 
-  const full = await fetch(`${baseUrl}${doc.contentUrl}`, {
-    headers: { Range: 'bytes=100-199' },
-  });
+  const full = await content(main, doc.contentUrl, 'bytes=100-199');
   assert.equal(full.status, 206);
   assert.equal(full.headers.get('accept-ranges'), 'bytes');
   assert.equal(full.headers.get('content-range'), `bytes 100-199/${PDF_SIZE}`);
   assert.equal(full.headers.get('content-length'), '100');
-  const bytes = Buffer.from(await full.arrayBuffer());
-  assert.deepEqual(bytes, payload.subarray(100, 200));
+  assert.deepEqual(Buffer.from(await full.arrayBuffer()), payload.subarray(100, 200));
 
-  const suffix = await fetch(`${baseUrl}${doc.contentUrl}`, {
-    headers: { Range: 'bytes=-64' },
-  });
+  const suffix = await content(main, doc.contentUrl, 'bytes=-64');
   assert.equal(suffix.status, 206);
   assert.deepEqual(Buffer.from(await suffix.arrayBuffer()), payload.subarray(PDF_SIZE - 64));
 
-  const openEnded = await fetch(`${baseUrl}${doc.contentUrl}`, {
-    headers: { Range: 'bytes=1000-' },
-  });
+  const openEnded = await content(main, doc.contentUrl, 'bytes=1000-');
   assert.equal(openEnded.status, 206);
   assert.equal(openEnded.headers.get('content-length'), String(PDF_SIZE - 1000));
   await openEnded.body.cancel();
 
-  const head = await fetch(`${baseUrl}${doc.contentUrl}`, { method: 'HEAD' });
+  const head = await fetch(`${main.baseUrl}${doc.contentUrl}`, {
+    method: 'HEAD',
+    headers: { Authorization: `Bearer ${AUTH_TOKEN}` },
+  });
   assert.equal(head.status, 200);
   assert.equal(head.headers.get('accept-ranges'), 'bytes');
   assert.equal(head.headers.get('content-length'), String(PDF_SIZE));
 
-  const stats = await api(`/api/documents/${doc.id}/stats`);
+  const stats = await api(main, `/api/documents/${doc.id}/stats`);
   assert.equal(stats.status, 200);
   assert.ok(stats.body.stats.rangeRequests >= 2);
   assert.ok(stats.body.stats.bytesServed > 0);
 
-  const deleted = await api(`/api/documents/${doc.id}`, { method: 'DELETE' });
-  assert.equal(deleted.status, 204);
+  assert.equal((await api(main, `/api/documents/${doc.id}`, { method: 'DELETE' })).status, 204);
 });
 
 test('returns 416 for unsatisfiable ranges', async () => {
-  const created = await api('/api/documents', {
+  const created = await api(main, '/api/documents', {
     method: 'POST',
-    body: { source: 'path', value: localPdfPath },
+    body: { source: 'url', value: remote.rangeUrl },
   });
   const doc = created.body.document;
-  const response = await fetch(`${baseUrl}${doc.contentUrl}`, {
-    headers: { Range: `bytes=${PDF_SIZE}-` },
-  });
+  const response = await content(main, doc.contentUrl, `bytes=${PDF_SIZE}-`);
   assert.equal(response.status, 416);
   assert.equal(response.headers.get('content-range'), `bytes */${PDF_SIZE}`);
   await response.body.cancel();
+  await api(main, `/api/documents/${doc.id}`, { method: 'DELETE' });
 });
 
-test('rejects non-PDF local files and missing paths', async () => {
-  const notPdf = await api('/api/documents', {
+test('rejects a remote PDF when the origin ignores Range', async () => {
+  const created = await api(main, '/api/documents', {
     method: 'POST',
-    body: { source: 'path', value: notPdfPath },
-  });
-  assert.equal(notPdf.status, 422);
-  assert.equal(notPdf.body.error.code, 'NOT_PDF');
-
-  const missing = await api('/api/documents', {
-    method: 'POST',
-    body: { source: 'path', value: path.join(WORK_DIR, 'does-not-exist.pdf') },
-  });
-  assert.equal(missing.status, 404);
-  assert.equal(missing.body.error.code, 'PATH_NOT_FOUND');
-});
-
-test('proxies remote Range requests without buffering the PDF', async () => {
-  const created = await api('/api/documents', {
-    method: 'POST',
-    body: { source: 'url', value: remoteServer.rangeUrl },
-  });
-  assert.equal(created.status, 201);
-  const doc = created.body.document;
-  assert.equal(doc.source, 'url');
-  assert.equal(doc.mirrored, false);
-  assert.equal(doc.size, PDF_SIZE);
-
-  const response = await fetch(`${baseUrl}${doc.contentUrl}`, {
-    headers: { Range: 'bytes=456-789' },
-  });
-  assert.equal(response.status, 206);
-  assert.equal(response.headers.get('content-range'), `bytes 456-789/${PDF_SIZE}`);
-  const bytes = Buffer.from(await response.arrayBuffer());
-  assert.deepEqual(bytes, payload.subarray(456, 790));
-
-  const stats = await api(`/api/documents/${doc.id}/stats`);
-  assert.ok(stats.body.stats.rangeRequests >= 1);
-  assert.equal(remoteServer.rangeRequestCount > 0, true);
-});
-
-test('mirrors a small remote PDF when the origin ignores Range', async () => {
-  const created = await api('/api/documents', {
-    method: 'POST',
-    body: { source: 'url', value: remoteServer.noRangeUrl },
-  });
-  assert.equal(created.status, 201);
-  const doc = created.body.document;
-  assert.equal(doc.mirrored, true);
-  assert.equal(doc.source, 'url');
-  assert.equal(doc.size, PDF_SIZE);
-
-  const response = await fetch(`${baseUrl}${doc.contentUrl}`, {
-    headers: { Range: 'bytes=10-19' },
-  });
-  assert.equal(response.status, 206);
-  assert.deepEqual(Buffer.from(await response.arrayBuffer()), payload.subarray(10, 20));
-});
-
-test('rejects an oversized remote PDF when the origin ignores Range', async () => {
-  const created = await api('/api/documents', {
-    method: 'POST',
-    body: { source: 'url', value: remoteServer.oversizedNoRangeUrl },
+    body: { source: 'url', value: remote.noRangeUrl },
   });
   assert.equal(created.status, 422);
   assert.equal(created.body.error.code, 'REMOTE_NO_RANGE');
 });
 
-test('returns helpful errors for unknown document sessions', async () => {
-  const response = await api('/api/documents/not-a-real-id/stats');
+test('rejects non-PDF remote content', async () => {
+  const created = await api(main, '/api/documents', {
+    method: 'POST',
+    body: { source: 'url', value: remote.notPdfUrl },
+  });
+  assert.equal(created.status, 422);
+  assert.equal(created.body.error.code, 'REMOTE_NOT_PDF');
+});
+
+test('marks content responses as non-cacheable and sandboxed', async () => {
+  const created = await api(main, '/api/documents', {
+    method: 'POST',
+    body: { source: 'url', value: remote.rangeUrl },
+  });
+  const response = await content(main, created.body.document.contentUrl, 'bytes=0-9');
+  assert.match(response.headers.get('cache-control') || '', /no-store/);
+  assert.equal(response.headers.get('content-security-policy'), "sandbox; default-src 'none'");
+  assert.equal(response.headers.get('cross-origin-resource-policy'), 'same-origin');
+  assert.equal(response.headers.get('x-content-type-options'), 'nosniff');
+  await response.body.cancel();
+  await api(main, `/api/documents/${created.body.document.id}`, { method: 'DELETE' });
+});
+
+/* ------------------------------------------------------------ P0-5 limits */
+
+test('enforces the per-client document quota', async () => {
+  const context = await startApp({
+    allowPrivateAddresses: true,
+    allowedRemotePorts: [remote.port],
+    maxDocuments: 10,
+    maxDocumentsPerIp: 1,
+    documentRateLimit: false,
+    contentRateLimit: false,
+    deleteRateLimit: false,
+  });
+  extraContexts.push(context);
+
+  const first = await api(context, '/api/documents', {
+    method: 'POST',
+    body: { source: 'url', value: remote.rangeUrl },
+  });
+  assert.equal(first.status, 201);
+
+  const second = await api(context, '/api/documents', {
+    method: 'POST',
+    body: { source: 'url', value: remote.rangeUrl },
+  });
+  assert.equal(second.status, 429);
+  assert.equal(second.body.error.code, 'DOCUMENT_QUOTA_EXCEEDED');
+
+  await api(context, `/api/documents/${first.body.document.id}`, { method: 'DELETE' });
+
+  const third = await api(context, '/api/documents', {
+    method: 'POST',
+    body: { source: 'url', value: remote.rangeUrl },
+  });
+  assert.equal(third.status, 201);
+});
+
+test('enforces the global document limit', async () => {
+  const context = await startApp({
+    allowPrivateAddresses: true,
+    allowedRemotePorts: [remote.port],
+    maxDocuments: 1,
+    maxDocumentsPerIp: 10,
+    documentRateLimit: false,
+    contentRateLimit: false,
+    deleteRateLimit: false,
+  });
+  extraContexts.push(context);
+
+  const first = await api(context, '/api/documents', {
+    method: 'POST',
+    body: { source: 'url', value: remote.rangeUrl },
+  });
+  assert.equal(first.status, 201);
+
+  const second = await api(context, '/api/documents', {
+    method: 'POST',
+    body: { source: 'url', value: remote.noRangeUrl },
+  });
+  assert.equal(second.status, 503);
+  assert.equal(second.body.error.code, 'MAX_DOCUMENTS_REACHED');
+});
+
+test('rate limits document creation', async () => {
+  const context = await startApp({
+    allowPrivateAddresses: true,
+    allowedRemotePorts: [remote.port],
+    maxDocuments: 10,
+    maxDocumentsPerIp: 10,
+    documentRateLimit: { windowMs: 60_000, max: 2 },
+    contentRateLimit: false,
+    deleteRateLimit: false,
+  });
+  extraContexts.push(context);
+
+  for (let index = 0; index < 2; index += 1) {
+    const response = await api(context, '/api/documents', {
+      method: 'POST',
+      body: { source: 'url', value: remote.rangeUrl },
+    });
+    assert.equal(response.status, 201);
+  }
+
+  const limited = await api(context, '/api/documents', {
+    method: 'POST',
+    body: { source: 'url', value: remote.rangeUrl },
+  });
+  assert.equal(limited.status, 429);
+  assert.equal(limited.body.error.code, 'RATE_LIMITED');
+  assert.ok(Number(limited.headers.get('retry-after')) >= 1);
+});
+
+test('times out a slow upstream', async () => {
+  const context = await startApp({
+    allowPrivateAddresses: true,
+    allowedRemotePorts: [remote.port],
+    remoteHeadersTimeoutMs: 200,
+    documentRateLimit: false,
+    contentRateLimit: false,
+    deleteRateLimit: false,
+  });
+  extraContexts.push(context);
+
+  const created = await api(context, '/api/documents', {
+    method: 'POST',
+    body: { source: 'url', value: `${remote.origin}/slow-headers.pdf` },
+  });
+  assert.equal(created.status, 504);
+  assert.equal(created.body.error.code, 'REMOTE_TIMEOUT');
+});
+
+test('aborts a full-body response larger than MAX_REMOTE_BYTES', async () => {
+  const context = await startApp({
+    allowPrivateAddresses: true,
+    allowedRemotePorts: [remote.port],
+    maxRemoteBytes: 1024,
+    documentRateLimit: false,
+    contentRateLimit: false,
+    deleteRateLimit: false,
+  });
+  extraContexts.push(context);
+
+  const created = await api(context, '/api/documents', {
+    method: 'POST',
+    body: { source: 'url', value: remote.rangeUrl },
+  });
+  assert.equal(created.status, 201);
+
+  await assert.rejects(async () => {
+    const response = await fetch(`${context.baseUrl}${created.body.document.contentUrl}`, {
+      headers: { Authorization: `Bearer ${AUTH_TOKEN}` },
+    });
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}`);
+    }
+    await response.arrayBuffer();
+  });
+
+  // A client must not be able to bypass the cap by requesting the whole file
+  // through a single Range request.
+  await assert.rejects(async () => {
+    const response = await fetch(`${context.baseUrl}${created.body.document.contentUrl}`, {
+      headers: {
+        Authorization: `Bearer ${AUTH_TOKEN}`,
+        Range: `bytes=0-${PDF_SIZE - 1}`,
+      },
+    });
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}`);
+    }
+    await response.arrayBuffer();
+  });
+});
+
+test('releases concurrency slots after completed and aborted responses', async () => {
+  const context = await startApp({
+    allowPrivateAddresses: true,
+    allowedRemotePorts: [remote.port],
+    maxConcurrentStreams: 2,
+    documentRateLimit: false,
+    contentRateLimit: false,
+    deleteRateLimit: false,
+  });
+  extraContexts.push(context);
+
+  const created = await api(context, '/api/documents', {
+    method: 'POST',
+    body: { source: 'url', value: remote.rangeUrl },
+  });
+  const route = created.body.document.contentUrl;
+
+  for (let index = 0; index < 5; index += 1) {
+    const response = await content(context, route, 'bytes=0-1023');
+    assert.equal(response.status, 206, `completed request ${index}`);
+    await response.arrayBuffer();
+  }
+
+  for (let index = 0; index < 5; index += 1) {
+    const response = await content(context, route, 'bytes=0-1048575');
+    assert.equal(response.status, 206, `aborted request ${index}`);
+    await response.body.cancel();
+  }
+
+  await waitFor(() => context.getStreamStats().active === 0);
+  assert.ok(context.getStreamStats().peak <= 2);
+});
+
+test('returns a helpful error for unknown document sessions', async () => {
+  const response = await api(main, '/api/documents/not-a-real-id/stats');
   assert.equal(response.status, 404);
   assert.equal(response.body.error.code, 'DOCUMENT_NOT_FOUND');
 });
 
-async function api(route, { method = 'GET', body } = {}) {
-  const response = await fetch(`${baseUrl}${route}`, {
+/* ------------------------------------------------------------------ Helpers */
+
+async function startApp(options = {}) {
+  const created = createApp({ authToken: AUTH_TOKEN, ...options });
+  const server = created.app.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+
+  return {
+    ...created,
+    server,
+    baseUrl: `http://127.0.0.1:${server.address().port}`,
+    async cleanup() {
+      created.stop?.();
+      await created.store.cleanupAll();
+      await closeServer(server);
+    },
+  };
+}
+
+async function api(context, route, { method = 'GET', body, token = AUTH_TOKEN } = {}) {
+  const headers = {};
+  if (body) {
+    headers['Content-Type'] = 'application/json';
+  }
+  if (token !== null) {
+    headers.Authorization = `Bearer ${token}`;
+  }
+
+  const response = await fetch(`${context.baseUrl}${route}`, {
     method,
-    headers: body ? { 'Content-Type': 'application/json' } : undefined,
+    headers,
     body: body ? JSON.stringify(body) : undefined,
   });
   let parsed = null;
@@ -193,26 +522,81 @@ async function api(route, { method = 'GET', body } = {}) {
   return { status: response.status, body: parsed, headers: response.headers };
 }
 
+function content(context, route, range) {  return fetch(`${context.baseUrl}${route}`, {
+    headers: {
+      Authorization: `Bearer ${AUTH_TOKEN}`,
+      ...(range ? { Range: range } : {}),
+    },
+  });
+}
+
+async function waitFor(predicate, timeoutMs = 2000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (predicate()) {
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  assert.fail('timed out waiting for condition');
+}
+
 async function startRemoteFixture(pdfPayload) {
   const state = {
     rangeRequestCount: 0,
+    port: 0,
+    origin: '',
     server: null,
     rangeUrl: '',
     noRangeUrl: '',
-    oversizedNoRangeUrl: '',
+    notPdfUrl: '',
   };
 
   const server = http.createServer((req, res) => {
-    const isOversized = req.url.startsWith('/oversized.pdf');
-    const isNoRange = req.url.startsWith('/no-range.pdf');
-    const body = isOversized
-      ? Buffer.concat([pdfPayload, Buffer.alloc(4 * 1024 * 1024)])
-      : pdfPayload;
+    const url = new URL(req.url, 'http://fixture');
+
+    if (url.pathname === '/redirect-range') {
+      res.statusCode = 302;
+      res.setHeader('Location', '/range.pdf');
+      res.end();
+      return;
+    }
+    if (url.pathname === '/redirect-file') {
+      res.statusCode = 302;
+      res.setHeader('Location', 'file:///etc/passwd');
+      res.end();
+      return;
+    }
+    if (url.pathname === '/redirect-loop') {
+      res.statusCode = 302;
+      res.setHeader('Location', '/redirect-loop');
+      res.end();
+      return;
+    }
+    if (url.pathname === '/slow-headers.pdf') {
+      setTimeout(() => {
+        res.statusCode = 200;
+        res.setHeader('Content-Type', 'application/pdf');
+        res.end(pdfPayload);
+      }, 500);
+      return;
+    }
+    if (url.pathname === '/not-pdf.pdf') {
+      const body = Buffer.from('<html>not a pdf</html>');
+      res.statusCode = 200;
+      res.setHeader('Content-Type', 'text/html');
+      res.setHeader('Content-Length', String(body.length));
+      res.end(body);
+      return;
+    }
+
+    const isNoRange = url.pathname === '/no-range.pdf';
+    const body = pdfPayload;
 
     res.setHeader('Content-Type', 'application/pdf');
-    res.setHeader('Accept-Ranges', isNoRange || isOversized ? 'none' : 'bytes');
+    res.setHeader('Accept-Ranges', isNoRange ? 'none' : 'bytes');
 
-    if (!isNoRange && !isOversized && req.headers.range) {
+    if (!isNoRange && req.headers.range) {
       state.rangeRequestCount += 1;
       const range = parseRequestRange(req.headers.range, body.length);
       if (!range) {
@@ -238,9 +622,11 @@ async function startRemoteFixture(pdfPayload) {
   await once(server, 'listening');
   const origin = `http://127.0.0.1:${server.address().port}`;
   state.server = server;
+  state.port = server.address().port;
+  state.origin = origin;
   state.rangeUrl = `${origin}/range.pdf`;
   state.noRangeUrl = `${origin}/no-range.pdf`;
-  state.oversizedNoRangeUrl = `${origin}/oversized.pdf`;
+  state.notPdfUrl = `${origin}/not-pdf.pdf`;
   return state;
 }
 
