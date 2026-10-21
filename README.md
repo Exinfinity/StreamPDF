@@ -103,6 +103,7 @@ node scripts/make-gb-sample-pdf.mjs test-output/huge.pdf 501 2048
 | --- | --- | --- |
 | `PORT` | `3000` | 监听端口 |
 | `HOST` | `127.0.0.1` | 监听地址。建议保持回环，前面放反向代理 |
+| `ALLOWED_HOSTS` | 空（仅 `localhost`、`127.0.0.1`、`::1`） | 逗号分隔的 Host 白名单（可带端口）。`HOST` 绑定非回环地址时必须设置；不匹配的请求返回 421 |
 | `AUTH_TOKEN` | 随机生成 | 访问令牌，至少 16 个可打印非空格字符。未设置时启动时随机生成并打印 |
 | `MAX_DOCUMENTS` | `100` | 全局文档会话数上限，超过返回 503 |
 | `MAX_DOCUMENTS_PER_IP` | `5` | 每个客户端 IP 的文档会话数上限，超过返回 429 |
@@ -127,6 +128,17 @@ npm start
 ```
 
 文档创建、内容读取和删除接口还有进程内每 IP 限流：创建默认 10 次/分钟、内容读取 600 次/分钟、删除 30 次/分钟。连续失败的认证尝试默认限制为 10 次/分钟。`MAX_CONCURRENT_STREAMS` 默认 100；浏览器通常每个源只并发数个请求，普通预览不会触及上限；如果使用非浏览器客户端并一次发起大量并发 Range 请求，可能收到 503，可按需调高。公网部署时仍建议在反向代理层再配置 `limit_req` / `limit_conn`。
+
+如果需要通过域名从其他机器访问（或设置 `HOST=0.0.0.0`），必须同时设置 `ALLOWED_HOSTS`，并把反向代理的 `Host` 头原样传给 Node：
+
+```bash
+HOST=0.0.0.0 \
+ALLOWED_HOSTS='pdf.example.com,localhost' \
+AUTH_TOKEN='a-very-long-random-token' \
+npm start
+```
+
+`ALLOWED_HOSTS` 只做 Host 白名单匹配，不代替认证；`HOST` 非回环且未设置 `ALLOWED_HOSTS` 时进程会拒绝启动。未设置该项时只接受 `localhost`、`127.0.0.1`、`::1` 及其带端口形式，用于本地访问。
 
 ## 远端 URL 的行为
 
@@ -161,6 +173,10 @@ npm test       # 认证、SSRF、Range 代理、限流、资源上限等测试
 - 远端 PDF 的精确 Range 响应、`206`、`416`、`HEAD`；
 - 不支持 Range 的远端被明确拒绝；
 - 全局/每 IP 文档数、创建限流、上游超时、无 Range 响应大小上限；
+- 非白名单 `Host` 返回 421，回环与显式配置的域名可正常访问；
+- 文档元数据不包含绝对路径、owner IP、上游 URL、ETag/Last-Modified 等内部信息；
+- 远端错误不再回显上游状态码、主机名或端口；
+- 前端不再解析 `?path=` / `?url=` / `?open=`，不会在页面加载时触发服务端读取；
 - `pdfjs-dist` 版本高于 CVE 影响范围，且前端显式 `enableScripting: false`。
 
 也可以自行启动一个支持 Range 的测试 HTTP 服务来发送 `test-pdf/` 下的文件（该目录已被 `.gitignore` 忽略，不会进入仓库）。
@@ -171,8 +187,9 @@ npm test       # 认证、SSRF、Range 代理、限流、资源上限等测试
 .
 ├── server/
 │   ├── index.js        # 启动、环境变量、优雅退出
-│   ├── app.js          # Express 路由、认证、Range 响应、安全头、限流
+│   ├── app.js          # Express 路由、认证、Host 校验、Range 响应、安全头、限流
 │   ├── auth.js         # Bearer 令牌生成与常量时间校验
+│   ├── host.js         # Host 头解析、ALLOWED_HOSTS 白名单、DNS rebinding 防护
 │   ├── http-client.js  # SSRF 防护、DNS pinning、重定向校验、超时
 │   ├── documents.js    # 文档会话、统计、TTL/数量/每 IP 配额
 │   ├── rate-limit.js   # 进程内每 IP 固定窗口限流
@@ -194,17 +211,20 @@ PDF.js 直接从 `node_modules/pdfjs-dist` 提供静态资源，由 `/vendor/pdf
 
 ## 安全说明
 
-本轮修复针对 `SECURITY-AUDIT.md` 的 5 个 P0 问题：
+本轮修复覆盖 `SECURITY-AUDIT.md` 的 5 个 P0 与 3 个 P1 问题：
 
 1. **P0-1 本地文件读取（LFI）**：彻底移除 `source: "path"`、`PDF_ALLOWED_ROOTS`、本地文件探测与读取。服务端不再接受客户端提供的任何文件系统路径。
 2. **P0-2 SSRF**：只允许公网 HTTP(S) 地址；解析并校验全部 DNS 结果，拒绝回环/私网/链路本地/CGNAT/保留地址、IPv4-mapped IPv6、NAT64、6to4、Teredo；连接时 pin 住已校验 IP 防 DNS rebinding；手动处理最多 3 跳重定向并逐跳重新校验；禁止 URL 内嵌凭据；默认只允许 80/443；设置连接/响应头/响应体空闲超时。
 3. **P0-3 无认证**：所有文档接口（包括 `/api/config`、内容、统计、删除）都要求 Bearer 令牌；令牌用 `timingSafeEqual` 比较；`/api/health` 只返回 `{ ok: true }`。令牌通过 `Authorization` 头传递，不放在 URL 或 Cookie 中。
 4. **P0-4 PDF.js 漏洞**：升级到 `pdfjs-dist@^6.4.299`（高于修复版本 `6.2.108`），显式关闭 `enableScripting` 和 XFA，保留严格 CSP，内容响应加 `sandbox` CSP。
 5. **P0-5 资源耗尽**：文档总数、每 IP 文档数、并发流、上游超时、完整响应大小、创建/内容/删除请求速率均有上限；文档 TTL 默认缩短到 30 分钟；不再有临时镜像磁盘写入。
+6. **P1-1 Host 头 / DNS rebinding**：新增 Host 白名单中间件，不匹配返回 421；未配置时只接受回环主机名；`HOST` 绑定非回环地址时必须显式设置 `ALLOWED_HOSTS`，否则拒绝启动。
+7. **P1-2 信息泄露**：文档响应只保留 UI 必需字段，不再返回 owner IP、上游 URL、绝对路径、ETag/Last-Modified、配额等内部信息；远端错误不再回显上游状态码、主机/端口或压缩算法；所有 API 与错误响应带 `Cache-Control: no-store`。
+8. **P1-3 自动打开**：`?path=`、`?url=`、`?open=` 已在前后端彻底移除，打开文档只能由表单提交或“最近打开”点击触发，并加入静态回归测试。
 
 部署建议：
 
-- 保持 `HOST=127.0.0.1`，前面使用 nginx/Caddy 终止 TLS 并做认证/限流。
+- 保持 `HOST=127.0.0.1`，前面使用 nginx/Caddy 终止 TLS 并做认证/限流；如必须绑定非回环地址，设置 `ALLOWED_HOSTS` 且让代理传递原始 `Host`。
 - 始终设置强随机 `AUTH_TOKEN`，不要通过 URL 传递令牌。
 - 在主机/容器/防火墙层限制出站流量，禁止到 RFC1918、`169.254.0.0/16`、本机的出站访问。
 - 不要为了访问内网 PDF 而放宽 SSRF 校验；本项目按“只允许公网 URL”设计。
@@ -212,7 +232,6 @@ PDF.js 直接从 `node_modules/pdfjs-dist` 提供静态资源，由 `/vendor/pdf
 
 ## 已知限制
 
-- 浏览器无法从 `<input type=file>` 获得真实绝对路径；本项目也不再支持服务器本地路径或文件上传。
 - 远端必须支持 Range；不支持 Range 的 PDF 无法流式打开。
 - 对于超过 10,000 页的 PDF，PDF.js 官方 viewer 会自动切换为单页滚动模式以控制内存。
 - 超大页面在极高缩放比下受 `maxCanvasPixels` 限制，画布分辨率会自动封顶。

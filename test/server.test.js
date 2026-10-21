@@ -211,6 +211,9 @@ test('opens a remote PDF and serves exact byte ranges', async () => {
   assert.equal(doc.size, PDF_SIZE);
   assert.equal(doc.rangeSupported, true);
   assert.equal('location' in doc, false);
+  for (const field of ['ownerIp', 'remoteUrl', 'originalUrl', 'etag', 'lastModified', 'maxRemoteBytes']) {
+    assert.equal(field in doc, false, `${field} must not be exposed`);
+  }
   assert.equal(JSON.stringify(doc).includes(WORK_DIR), false);
 
   const full = await content(main, doc.contentUrl, 'bytes=100-199');
@@ -274,6 +277,26 @@ test('rejects non-PDF remote content', async () => {
   });
   assert.equal(created.status, 422);
   assert.equal(created.body.error.code, 'REMOTE_NOT_PDF');
+});
+
+test('does not leak upstream status codes or addresses in remote errors', async () => {
+  for (const [route, status, code] of [
+    ['/missing.pdf', 404, 'REMOTE_NOT_FOUND'],
+    ['/status-500.pdf', 502, 'REMOTE_HTTP_ERROR'],
+  ]) {
+    const response = await api(main, '/api/documents', {
+      method: 'POST',
+      body: { source: 'url', value: `${remote.origin}${route}` },
+    });
+    assert.equal(response.status, status, route);
+    assert.equal(response.body.error.code, code, route);
+
+    const payload = JSON.stringify(response.body);
+    assert.doesNotMatch(payload, /127\.0\.0\.1/, route);
+    assert.doesNotMatch(payload, new RegExp(`:${remote.port}`), route);
+    assert.doesNotMatch(payload, new RegExp(String(status)), route);
+    assert.doesNotMatch(payload, /HTTP \d{3}/, route);
+  }
 });
 
 test('marks content responses as non-cacheable and sandboxed', async () => {
@@ -587,6 +610,16 @@ async function startRemoteFixture(pdfPayload) {
       res.setHeader('Content-Type', 'text/html');
       res.setHeader('Content-Length', String(body.length));
       res.end(body);
+      return;
+    }
+    if (url.pathname === '/missing.pdf') {
+      res.statusCode = 404;
+      res.end('not found');
+      return;
+    }
+    if (url.pathname === '/status-500.pdf') {
+      res.statusCode = 500;
+      res.end('upstream failure');
       return;
     }
 

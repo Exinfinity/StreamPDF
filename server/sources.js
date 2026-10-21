@@ -180,7 +180,7 @@ export async function fetchRemoteBody(
       throw new HttpError(
         502,
         'REMOTE_RANGE_LOST',
-        `远端服务器本次没有返回 206 分片响应（HTTP ${response.status}）。`,
+        '远端服务器本次没有返回分片响应。',
         '远端链接可能已失效，或该服务器不支持稳定的 Range 请求。',
       );
     }
@@ -303,7 +303,10 @@ function sanitizeName(value) {
 
 function formatRemoteDisplay(url) {
   try {
-    return `${url.host}${decodeURIComponent(url.pathname)}`;
+    // Host + pathname only (never query/fragment/userinfo). Strip control
+    // characters so remote metadata cannot inject terminal/log lines.
+    const display = `${url.host}${decodeURIComponent(url.pathname)}`;
+    return display.replace(/[\u0000-\u001f\u007f]/g, '').slice(0, 512);
   } catch {
     return url.host;
   }
@@ -319,7 +322,7 @@ function ensureIdentityEncoding(headers) {
     throw new HttpError(
       422,
       'REMOTE_CONTENT_ENCODING',
-      `远端响应使用了 ${encoding} 压缩，无法保证 Range 字节语义。`,
+      '远端响应启用了传输压缩，无法保证 Range 字节语义。',
       '请使用未启用传输压缩的 PDF 直链。',
     );
   }
@@ -343,18 +346,20 @@ async function readPrefix(stream, length) {
 }
 
 function remoteStatusError(status) {
+  // Do not echo upstream status codes, hostnames or socket details: the
+  // proxy must not become an oracle for probing third-party endpoints.
   if (status === 401 || status === 403) {
     return new HttpError(
       502,
       'REMOTE_FORBIDDEN',
-      `远端拒绝访问（HTTP ${status}）。`,
+      '远端拒绝访问。',
       '该链接可能需要登录或签名；请使用可直接访问的公开链接。',
     );
   }
   if (status === 404) {
-    return new HttpError(404, 'REMOTE_NOT_FOUND', '远端文件不存在（HTTP 404）。');
+    return new HttpError(404, 'REMOTE_NOT_FOUND', '远端文件不存在。');
   }
-  return new HttpError(502, 'REMOTE_HTTP_ERROR', `远端返回 HTTP ${status}。`);
+  return new HttpError(502, 'REMOTE_HTTP_ERROR', '远端返回了错误状态，无法读取 PDF。');
 }
 
 function remoteNetworkError(error) {

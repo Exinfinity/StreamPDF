@@ -1,7 +1,9 @@
 import { createApp } from './app.js';
+import { isLoopbackHostname } from './host.js';
 
 const port = parsePort(process.env.PORT, 3000);
 const host = process.env.HOST || '127.0.0.1';
+const allowedHosts = (process.env.ALLOWED_HOSTS || '').trim();
 const maxDocuments = parseClampedInt(process.env.MAX_DOCUMENTS, 100, 1, 10_000);
 const maxDocumentsPerIp = parseClampedInt(process.env.MAX_DOCUMENTS_PER_IP, 5, 1, 1_000);
 const maxRemoteBytes = parseClampedInt(
@@ -27,9 +29,19 @@ const remoteBodyIdleTimeoutMs = parseClampedInt(
   300_000,
 );
 
+// P1-1: a non-loopback bind is an explicit public/LAN deployment. Refuse to
+// start without an operator-provided Host allowlist instead of silently
+// accepting arbitrary Host headers (DNS rebinding / cache poisoning).
+if (!isLoopbackHostname(host) && !allowedHosts) {
+  console.error('拒绝启动：HOST 不是回环地址时必须设置 ALLOWED_HOSTS。');
+  console.error('例如：ALLOWED_HOSTS=pdf.example.com,localhost HOST=0.0.0.0 npm start');
+  process.exit(1);
+}
+
 let created;
 try {
   created = createApp({
+    allowedHosts,
     maxDocuments,
     maxDocumentsPerIp,
     maxRemoteBytes,
@@ -53,6 +65,9 @@ const server = app.listen(port, host, () => {
   console.log('  StreamPDF 已启动');
   console.log(`  → http://${shownHost}:${port}`);
   console.log(`  监听 ${host}:${port}`);
+  console.log(
+    `  允许的 Host：${allowedHosts || 'localhost、127.0.0.1、::1（仅回环）'}`,
+  );
   console.log('');
   if (authTokenGenerated) {
     console.log('  访问令牌（本次启动随机生成，重启后失效）：');

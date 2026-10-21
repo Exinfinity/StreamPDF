@@ -8,6 +8,7 @@ import express from 'express';
 import { normalizeAuthToken, requireAuth, sendUnauthorized } from './auth.js';
 import { DocumentStore } from './documents.js';
 import { HttpError, errorPayload } from './errors.js';
+import { createHostGuard } from './host.js';
 import { createRemotePolicy } from './http-client.js';
 import { createRateLimiter, disabledLimiter } from './rate-limit.js';
 import { parseRangeHeader } from './range.js';
@@ -26,6 +27,12 @@ export function createApp(options = {}) {
   const { token: authToken, generated: authTokenGenerated } = normalizeAuthToken(
     options.authToken !== undefined ? options.authToken : process.env.AUTH_TOKEN,
   );
+
+  // P1-1: reject requests whose Host header is not explicitly allowed. This
+  // closes the DNS-rebinding precondition for a loopback-bound instance and
+  // prevents Host-header cache poisoning when deployed behind a proxy.
+  const allowedHosts =
+    options.allowedHosts !== undefined ? options.allowedHosts : process.env.ALLOWED_HOSTS;
 
   const remotePolicy =
     options.remotePolicy ??
@@ -71,10 +78,17 @@ export function createApp(options = {}) {
     app.set('trust proxy', options.trustProxy);
   }
   app.use(securityHeaders);
+  app.use(createHostGuard(allowedHosts));
+
+  // API responses can contain document metadata and per-session statistics;
+  // never let a browser or intermediary cache them.
+  app.use('/api', (_req, res, next) => {
+    res.setHeader('Cache-Control', 'no-store');
+    next();
+  });
 
   // Public health endpoint intentionally exposes liveness only.
   app.get('/api/health', (_req, res) => {
-    res.setHeader('Cache-Control', 'no-store');
     res.json({ ok: true });
   });
 
@@ -219,6 +233,7 @@ export function createApp(options = {}) {
     ]) {
       res.removeHeader(header);
     }
+    res.setHeader('Cache-Control', 'no-store');
 
     let normalized = error;
     if (error?.type === 'entity.parse.failed') {

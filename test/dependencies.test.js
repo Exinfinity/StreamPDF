@@ -20,3 +20,11 @@ test('frontend disables PDF scripting explicitly', async () => {
   assert.match(source, /enableScripting:\s*false/);
   assert.doesNotMatch(source, /enableScripting:\s*true/);
 });
+
+test('frontend never auto-opens documents from query parameters (P1-3)', async () => {
+  const source = await readFile(path.resolve('public', 'js', 'app.js'), 'utf8');
+  assert.doesNotMatch(source, /\bURLSearchParams\b/);
+  assert.doesNotMatch(source, /location\.search/);
+  assert.doesNotMatch(source, /\b(autoUrl|autoPath|autoOpen)\b/);
+  assert.doesNotMatch(source, /\.get\(\s*['"](?:url|path|open)['"]\s*\)/);
+});

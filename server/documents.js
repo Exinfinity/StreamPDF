@@ -136,6 +136,9 @@ export class DocumentStore {
   }
 
   publicInfo(doc) {
+    // Keep this list deliberately small: no owner IP, upstream URL, absolute
+    // path, upstream ETag/Last-Modified or document counters. Those values
+    // help an attacker map the deployment without being needed by the UI.
     return {
       id: doc.id,
       name: doc.name,
@@ -146,9 +149,6 @@ export class DocumentStore {
       mirrored: false,
       rangeSupported: true,
       contentUrl: `/api/documents/${doc.id}/content`,
-      createdAt: new Date(doc.createdAt).toISOString(),
-      lastModified: doc.lastModified ?? null,
-      etag: doc.etag,
     };
   }
 

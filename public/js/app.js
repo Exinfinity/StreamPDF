@@ -111,6 +111,9 @@ linkService.setViewer(pdfViewer);
 init();
 
 function init() {
+  // P1-3: never act on ?path= / ?url= / ?open= (or any other query string).
+  // Opening a document requires an explicit form submit or recent-list click,
+  // so a crafted link cannot make the server read a URL on the user's behalf.
   initAuth();
   initOpenPanels();
   renderRecent();

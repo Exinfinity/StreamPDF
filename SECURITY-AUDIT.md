@@ -5,7 +5,7 @@
 - **复核日期**：2026-10-21（P0 修复后）
 - **审计范围**：`server/`、`public/`、`package.json` / `package-lock.json`、运行配置与 README
 - **审计方法**：源码审计 + `npm audit --omit=dev` + 在 `127.0.0.1` 临时端口上的动态验证（未修改生产数据）
-- **复核结论**：**P0-1 ~ P0-5 已修复**（URL-only 模式、SSRF 防护、Bearer 认证、PDF.js 升级、资源限制）。`npm test` 27/27 通过，`npm audit --omit=dev` 为 0 漏洞。P1-1（Host 头白名单）仍未在应用层实现，公网部署前应在反向代理层限制 `Host`，并继续完成 P1/P2/P3 加固。
+- **复核结论**：**P0-1 ~ P0-5 与 P1-1 ~ P1-3 均已修复**（URL-only 模式、SSRF 防护、Bearer 认证、PDF.js 升级、资源限制、Host 白名单、信息脱敏、移除自动打开）。`npm test` 34/34 通过，`npm audit --omit=dev` 为 0 漏洞。公网部署前仍建议在反向代理层限制 `Host`、完成 P2/P3 加固。
 - **原始结论**：修复前版本不能直接暴露到公网。至少存在 3 个未认证即可利用的阻断级问题（任意本地 PDF 读取、SSRF、全站无认证），以及拒绝服务、Host 头/DNS rebinding、信息泄露等问题。
 
 ---
@@ -19,9 +19,9 @@
 | P0-3 | **严重** | 全站无认证/授权；文档 ID 即能力令牌 | `server/app.js:36-114` | 任何人可创建会话、读内容、删会话、耗尽资源 | **已修复**：Bearer 令牌 + 认证失败限流 |
 | P0-4 | **高** | `pdfjs-dist@5.7.284` 命中高危漏洞 GHSA-hq66-cqwq-w95j（CVE-2026-16633） | `package.json` | 当前代码有多层缓解，但依赖仍应升级 | **已修复**：升级到 6.4.299，显式关闭脚本 |
 | P0-5 | **高** | 资源耗尽/拒绝服务：文档数、镜像磁盘、并发、上游超时均无上限 | `server/documents.js:10-44`、`server/sources.js:266-313` | 任何人可耗尽磁盘/连接/带宽 | **已修复**：数量/并发/超时/大小/速率限制；移除镜像 |
-| P1-1 | **高** | `Host` 头未校验，存在 DNS rebinding 前置条件 | `server/app.js:31-34` | 恶意网页可借 DNS rebinding 读取本地实例 | **未修复**：应用层未做 Host 白名单；需反向代理限制，认证已降低风险 |
-| P1-2 | **高** | 信息泄露：绝对路径、文件系统错误、内网主机/状态、会话计数 | `server/documents.js:86-102`、`server/sources.js:60,114,492-523` | 辅助 LFI/SSRF，泄露服务器布局 | **基本修复**：不再返回绝对路径/文档数/uptime；远端错误已脱敏 |
-| P1-3 | **中** | `?path=` / `?url=` / `?open=` 在页面加载时自动触发服务端读取 | `public/js/app.js:112-123` | 诱导点击即可触发 LFI/SSRF（drive-by） | **已修复**：移除全部自动打开参数 |
+| P1-1 | **高** | `Host` 头未校验，存在 DNS rebinding 前置条件 | `server/host.js`、`server/app.js`、`server/index.js` | 恶意网页可借 DNS rebinding 读取本地实例 | **已修复（2026-10-21 第二轮）**：Host 白名单，不匹配返回 421；非回环绑定必须配置 `ALLOWED_HOSTS` |
+| P1-2 | **高** | 信息泄露：绝对路径、文件系统错误、内网主机/状态、会话计数 | `server/documents.js`、`server/sources.js` | 辅助 LFI/SSRF，泄露服务器布局 | **已修复（2026-10-21 第二轮）**：元数据最小化，远端错误不再回显状态码/主机/端口，API 全部 `no-store` |
+| P1-3 | **中** | `?path=` / `?url=` / `?open=` 在页面加载时自动触发服务端读取 | `public/js/app.js` | 诱导点击即可触发 LFI/SSRF（drive-by） | **已修复**：移除全部自动打开参数，并加入静态回归测试 |
 | P2-1 | **中** | 安全响应头不完整；敏感 PDF 可缓存 1 小时 | `server/app.js:309-353` | 缺少 HSTS/COOP/CORP/Permissions-Policy，缓存残留 | **已修复**：补齐安全头，内容响应 `no-store` + `sandbox` CSP |
 | P2-2 | **中** | PDF 目录项 `item.url` 未校验协议即 `window.open` | `public/js/app.js:804-824` | 恶意 PDF 可能触发 `javascript:`/自定义协议 | **已修复**：outline URL 仅允许 http/https/mailto |
 | P2-3 | **中** | 无 CSRF/Origin 防护；若日后加 Cookie 认证会立即中招 | `server/app.js:54-85` | 当前无 Cookie，风险较低，但设计上应提前防护 | **已规避**：使用 Authorization 头而非 Cookie；若改 Cookie 需补 CSRF |
@@ -83,11 +83,37 @@
 - 文档 TTL 默认缩短到 30 分钟；Node HTTP 服务器设置 `headersTimeout`、`requestTimeout`、`keepAliveTimeout`、`maxConnections`、`maxRequestsPerSocket`。
 - 临时镜像已删除，不再存在镜像磁盘残留与镜像总量配额问题。
 
+### P1-1 ~ P1-3 已修复（2026-10-21 第二轮）
+
+#### P1-1 Host 头白名单 / DNS rebinding
+
+- 新增 `server/host.js`：严格解析 `Host` 头（支持 `host:port` 与 `[IPv6]:port`，拒绝重复 Host、无括号 IPv6、非法端口、通配符和 URL 形式）。
+- `server/app.js` 在路由和认证之前执行 Host 校验；不匹配返回 **421 Misdirected Request**，缺失 Host 由 Node（HTTP/1.1 返回 400）或 Host 校验（HTTP/1.0 返回 421）拒绝；`/api/health` 和静态资源同样受保护。
+- 默认只允许 `localhost`、`127.0.0.1`、`::1`（含任意端口及 IPv4-mapped/展开形式）等回环主机名。
+- `ALLOWED_HOSTS` 支持逗号分隔域名（可带端口），与回环主机名共同生效。
+- `server/index.js` 在 `HOST` 绑定非回环地址且未配置 `ALLOWED_HOSTS` 时**拒绝启动**，避免“监听 0.0.0.0 但忘记 Host 白名单”的误配置。
+- 反向代理仍应配置 `server_name`/Host 白名单，并保持 `proxy_set_header Host $host`，形成纵深防御。
+
+#### P1-2 信息泄露收口
+
+- `publicInfo()` 只返回 UI 必需字段（`id`、`name`、`size`、`contentType`、`source`、`display`、`mirrored`、`rangeSupported`、`contentUrl`）；不再返回 owner IP、上游 URL、绝对路径、ETag、Last-Modified、配额等内部信息。
+- 远端错误统一脱敏：不再回显上游 HTTP 状态码、主机名、端口、压缩算法或 socket/TLS 细节；保留 `REMOTE_FORBIDDEN`、`REMOTE_NOT_FOUND` 等语义错误码。
+- `display` 只保留 host + pathname（不含 query/fragment/userinfo），并去除控制字符、限制长度。
+- 所有 `/api/*` 响应与错误响应设置 `Cache-Control: no-store`，避免元数据/错误被缓存。
+- `/api/health` 仍只返回 `{ ok: true }`，`/api/config` 仍只返回 `rangeChunkSize`；不再提供会话计数或 uptime。
+
+#### P1-3 移除 `?path=` / `?url=` / `?open=` 自动打开
+
+- 前端不再读取 `window.location.search`、不使用 `URLSearchParams`，页面加载不会触发任何 `POST /api/documents`。
+- 打开文档只允许两种显式用户操作：提交打开表单，或点击“最近打开”条目。
+- 新增静态回归测试，禁止 `URLSearchParams`、`location.search`、`autoUrl/autoPath/autoOpen` 及 `get('url'/'path'/'open')` 重新出现在前端代码中。
+
 ### 修复后实际配置
 
 | 环境变量 | 实际默认值 | 说明 |
 | --- | --- | --- |
 | `HOST` / `PORT` | `127.0.0.1` / `3000` | 建议保持回环，由反向代理接入 |
+| `ALLOWED_HOSTS` | 空（仅回环主机名） | 逗号分隔 Host 白名单；非回环绑定必须设置，不匹配返回 421 |
 | `AUTH_TOKEN` | 随机生成 | 至少 16 个字符；未设置时启动打印随机值 |
 | `MAX_DOCUMENTS` | `100` | 全局文档数上限 |
 | `MAX_DOCUMENTS_PER_IP` | `5` | 每 IP 文档数上限 |
@@ -104,17 +130,19 @@
 
 ### 复核验证结果
 
-- `npm test`：**27 项通过，0 失败**（认证、LFI 拒绝、SSRF 地址/编码/重定向、Range 代理、限流、并发槽释放、上游超时、大小上限等）。
+- `npm test`：**34 项通过，0 失败**（认证、LFI 拒绝、SSRF 地址/编码/重定向、Range 代理、限流、并发槽释放、上游超时、大小上限、Host 白名单、信息脱敏、前端无自动打开等）。
 - `npm audit --omit=dev`：**0 vulnerabilities**。
 - 使用 `test-pdf/大辞海：法学卷.pdf`（约 1.1 GB）经本地 Range 测试服务验证：创建文档 201、分片读取 206、`Content-Range` 正确、无认证返回 401、删除 204。
 - 使用 PDF.js 6 实际解析该 1.1 GB PDF 成功（868 页）。
-- 环境无可用的图形浏览器，未做真实浏览器 GUI 点击回归；前端通过语法检查，服务端/API 与 PDF.js 解析链路已验证。
+- Host 校验动态验证：`Host: evil.example` / 非白名单域名返回 421；`Host: pdf.example.com`、带端口、大小写、回环别名返回 200；重复 Host 与缺失 Host 被拒绝或由 Node 返回 400。
+- 未设置 `ALLOWED_HOSTS` 且 `HOST=0.0.0.0` 时进程拒绝启动；设置后正常监听。
+- 环境无可用的图形浏览器，未做真实浏览器 GUI 点击回归；前端通过语法检查与静态回归测试，服务端/API 与 PDF.js 解析链路已验证。
 
 ### 复核后仍待处理
 
-- **P1-1**：应用层仍未校验 `Host`；公网部署时必须在 nginx/Caddy 配置 `server_name`/Host 白名单，并保持 Node 只绑定回环。
 - **P2-3**：当前 Bearer 头认证天然规避 CSRF；若将来改用 Cookie 会话，必须增加 CSRF token 与 `Origin`/`Sec-Fetch-Site` 校验。
 - **P3**：CI 依赖扫描、容器/systemd 加固、日志脱敏、监控告警、出站防火墙仍需在部署层完成。
+- 反向代理仍应配置 `server_name`/Host 白名单并传递正确 `Host`；应用层白名单用于纵深防御，不替代代理配置。
 
 ---
 
@@ -661,7 +689,9 @@ server.timeout = 120_000;             // 空闲 socket
 
 ### P1-1 `Host` 头未校验 / DNS rebinding
 
-**位置**
+> **修复状态（2026-10-21 第二轮）**：**已修复**。新增 `server/host.js` Host 白名单中间件，不匹配返回 421；非回环绑定强制要求 `ALLOWED_HOSTS`，否则拒绝启动。详见 [P1-1 ~ P1-3 已修复](#p1-1--p1-3-已修复2026-10-21-第二轮)。以下为修复前的问题与建议，保留作历史记录。
+
+**位置（修复前）**
 
 - `server/app.js:31-34`：`express()` 初始化，没有 Host 校验中间件。
 - `server/index.js:4`：默认绑定 `127.0.0.1`。
@@ -721,7 +751,9 @@ app.use((req, res, next) => {
 
 ### P1-2 信息泄露
 
-**位置与内容**
+> **修复状态（2026-10-21 第二轮）**：**已修复**。文档元数据最小化，远端错误不回显状态码/主机/端口/压缩算法，API 与错误响应统一 `no-store`；绝对路径、文档数、uptime 已不再返回。详见 [P1-1 ~ P1-3 已修复](#p1-1--p1-3-已修复2026-10-21-第二轮)。以下为修复前的问题与建议，保留作历史记录。
+
+**位置与内容（修复前）**
 
 | 位置 | 泄露内容 |
 | --- | --- |
@@ -758,7 +790,9 @@ app.use((req, res, next) => {
 
 ### P1-3 `?path=` / `?url=` / `?open=` 自动打开
 
-**位置**
+> **修复状态（2026-10-21 第二轮）**：**已修复**。前端不读取查询字符串，页面加载不会触发 `POST /api/documents`；并加入静态回归测试防止重新引入。详见 [P1-1 ~ P1-3 已修复](#p1-1--p1-3-已修复2026-10-21-第二轮)。以下为修复前的问题与建议，保留作历史记录。
+
+**位置（修复前）**
 
 - `public/js/app.js:112-123`
 
@@ -1287,16 +1321,17 @@ LimitNOFILE=4096
 
 ### Host / CSRF / 头
 
-- [ ] 非白名单 Host 返回 421。
-- [ ] 跨站 POST/DELETE 被拒绝（Cookie 模式）。
-- [ ] HSTS/COOP/CORP/Permissions-Policy 存在。
-- [ ] `/content` 直接导航带 `sandbox` CSP。
+- [x] 非白名单 Host 返回 421。
+- [x] 非回环绑定且未设置 `ALLOWED_HOSTS` 时拒绝启动。
+- [ ] 跨站 POST/DELETE 被拒绝（Cookie 模式；当前无 Cookie）。
+- [x] HSTS/COOP/CORP/Permissions-Policy 存在。
+- [x] `/content` 直接导航带 `sandbox` CSP。
 
 ### 前端
 
-- [ ] `?path=` / `?url=` 不再自动触发。
-- [ ] 恶意 outline URL 被拒绝。
-- [ ] 恶意 PDF 不执行脚本（PDF.js 升级后）。
+- [x] `?path=` / `?url=` 不再自动触发。
+- [x] 恶意 outline URL 被拒绝。
+- [x] 恶意 PDF 不执行脚本（PDF.js 升级后）。
 
 ---
 
@@ -1315,6 +1350,9 @@ LimitNOFILE=4096
 - 无 CORS 响应头，降低跨站读取 API 的风险。
 - `express.json({ limit: '32kb' })` 在认证之后解析，未认证请求不能消耗 JSON 解析资源；URL 长度限制 8192。
 - `app.disable('x-powered-by')`，不暴露框架版本。
+- `server/host.js` 严格校验 `Host`：默认仅回环主机名，`ALLOWED_HOSTS` 可配置；不匹配返回 421，非回环绑定强制配置。
+- 文档元数据最小化；远端错误不回显上游状态码/主机/端口；所有 API 与错误响应 `Cache-Control: no-store`。
+- 前端不读取查询字符串，打开文档必须由用户显式操作；静态测试防止 `?path`/`?url` 自动打开回归。
 - 无 `child_process`/`eval`/SQL/反序列化；服务端攻击面主要是远端网络。
 - PDF.js 配置 `enableScripting: false`、`enableXfa: false`、`maxCanvasPixels` 限制、`disableAutoFetch`/`disableStream` 控制浏览器资源。
 - 错误处理在响应头发送后销毁连接，避免半截响应；客户端中断不会记录为 500。
@@ -1333,12 +1371,12 @@ LimitNOFILE=4096
 3. ✅ 实现公网 IP 校验、DNS pinning、逐跳重定向校验、端口限制与超时；出站防火墙仍需部署层配置。
 4. ✅ 升级 `pdfjs-dist` 到 `6.4.299`，显式 `enableScripting: false`、`enableXfa: false`。
 5. ✅ 加文档数/每 IP 配额/并发/上游超时/响应大小/速率限制；临时镜像已删除。
-6. ⚠️ 应用层 Host 白名单未实现；需在反向代理配置 `server_name` 并保持 Node 绑定回环。
+6. ✅ 应用层 Host 白名单已实现；非回环绑定必须设置 `ALLOWED_HOSTS`，反向代理仍应配置 `server_name`。
 
 ### 第 1 周（P1）
 
-7. ✅ 移除 `?path`/`?url` 自动打开。
-8. ✅ 脱敏绝对路径、错误信息、健康/配置信息。
+7. ✅ 移除 `?path`/`?url` 自动打开，并加静态回归测试。
+8. ✅ 脱敏绝对路径、错误信息、健康/配置信息、上游状态码与主机。
 9. ✅ 补全安全头与缓存策略；`/content` 加 `sandbox` CSP 与 `no-store`。
 10. ✅ 临时镜像已删除，无需再清理镜像残留。
 
@@ -1385,7 +1423,7 @@ found 0 vulnerabilities
 ### B.1 修复复核环境与结果
 
 - Node.js `v24.19.0`
-- `npm test`：27 项通过，0 失败
+- `npm test`：34 项通过，0 失败
 - `npm audit --omit=dev`：0 vulnerabilities
 - 使用 `test-pdf/大辞海：法学卷.pdf`（约 1.1 GB）经本地 Range 测试服务验证分片读取
 - 使用 PDF.js 6 实际解析该 PDF 成功（868 页）
@@ -1418,9 +1456,9 @@ found 0 vulnerabilities
 
 ---
 
-**最终建议**：P0-1 ~ P0-5 已修复，但公网部署前仍应：
+**最终建议**：P0-1 ~ P0-5 与 P1-1 ~ P1-3 均已修复，但公网部署前仍应：
 
-1. 保持 `HOST=127.0.0.1`，由 nginx/Caddy 终止 TLS，并配置 `server_name`/Host 白名单（P1-1）。
+1. 优先保持 `HOST=127.0.0.1`，由 nginx/Caddy 终止 TLS，并配置 `server_name`/Host 白名单；如绑定非回环地址，必须设置 `ALLOWED_HOSTS`。
 2. 设置强随机 `AUTH_TOKEN`，并在反向代理层再做认证/限流。
 3. 在主机/容器/防火墙限制出站流量，阻断到 RFC1918、`169.254.0.0/16` 和本机的连接。
 4. 完成 P3 的 CI 依赖扫描、容器/systemd 加固、日志脱敏和监控告警后再考虑全面公网开放。
