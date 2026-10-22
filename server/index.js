@@ -24,11 +24,12 @@ const maxRemoteBytes = parseClampedInt(
 const documentTtlMinutes = parseClampedInt(process.env.DOCUMENT_TTL_MINUTES, 30, 1, 24 * 60);
 const maxConcurrentStreams = parseClampedInt(process.env.MAX_CONCURRENT_STREAMS, 100, 1, 1000);
 const allowedRemotePorts = parsePortList(process.env.ALLOWED_REMOTE_PORTS, [80, 443]);
-// Intranet-first default: allow the URL proxy to reach RFC1918, CGNAT,
-// loopback and host services on any port. Link-local/cloud metadata remains
-// blocked. Set ALLOW_PRIVATE_ADDRESSES=0 only if this instance must face the
-// public internet and needs the public-only address/port allowlist.
-const allowPrivateAddresses = process.env.ALLOW_PRIVATE_ADDRESSES !== '0';
+// Public-facing strict mode is the default: only global unicast addresses and
+// the ALLOWED_REMOTE_PORTS allowlist are reachable. Set
+// ALLOW_PRIVATE_ADDRESSES=1 only for a trusted intranet deployment that must
+// read PDFs from RFC1918, CGNAT, loopback or host services; link-local/cloud
+// metadata remains blocked.
+const allowPrivateAddresses = process.env.ALLOW_PRIVATE_ADDRESSES === '1';
 const trustProxy = process.env.TRUST_PROXY === '1' ? 1 : false;
 const enableMetrics = process.env.ENABLE_METRICS === '1';
 const metricsLogIntervalMinutes = parseClampedInt(

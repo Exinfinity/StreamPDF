@@ -34,7 +34,7 @@ services:
       HOST: 0.0.0.0
       PORT: "3000"
       # Fail closed if the operator forgot to export the secrets.
-      ALLOWED_HOSTS: "${ALLOWED_HOSTS:?set ALLOWED_HOSTS to the intranet hostname/IP}"
+      ALLOWED_HOSTS: "${ALLOWED_HOSTS:?set ALLOWED_HOSTS to the public/intranet hostname/IP}"
       AUTH_TOKEN: "${AUTH_TOKEN:?set AUTH_TOKEN to a long random value}"
       TRUST_PROXY: "1"
       ENABLE_HSTS: "1"

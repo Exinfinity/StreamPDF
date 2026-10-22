@@ -56,8 +56,8 @@ test('isPublicAddress accepts only globally routable unicast addresses', () => {
   assert.equal(isPublicAddress('not-an-ip'), false);
 });
 
-test('intranet mode allows private/loopback addresses and any port by default', async () => {
-  const policy = createRemotePolicy();
+test('opt-in intranet mode allows private/loopback addresses and any port', async () => {
+  const policy = createRemotePolicy({ allowPrivateAddresses: true });
   assert.equal(policy.allowPrivateAddresses, true);
 
   const url = parseRemoteUrl('http://192.168.1.20:8080/book.pdf', policy);
@@ -89,8 +89,18 @@ test('intranet mode allows private/loopback addresses and any port by default', 
   );
 });
 
-test('public-only mode rejects credentials, bad schemes and disallowed ports', () => {
-  const policy = createRemotePolicy({ allowPrivateAddresses: false, allowedPorts: [80, 443] });
+test('public-only strict mode is the default and rejects credentials, bad schemes and disallowed ports', async () => {
+  const policy = createRemotePolicy();
+  assert.equal(policy.allowPrivateAddresses, false);
+
+  await assert.rejects(
+    () => resolveRemoteAddress('127.0.0.1', policy),
+    (error) => error instanceof HttpError && error.code === 'REMOTE_ADDRESS_BLOCKED',
+  );
+  await assert.rejects(
+    () => resolveRemoteAddress('192.168.1.20', policy),
+    (error) => error instanceof HttpError && error.code === 'REMOTE_ADDRESS_BLOCKED',
+  );
 
   assert.equal(parseRemoteUrl('https://example.com/book.pdf', policy).host, 'example.com');
   assert.equal(parseRemoteUrl('http://example.com:80/book.pdf', policy).port, '');

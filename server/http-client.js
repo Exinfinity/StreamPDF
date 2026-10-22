@@ -14,8 +14,10 @@ const DEFAULT_BODY_IDLE_TIMEOUT_MS = 30_000;
 const DEFAULT_MAX_REDIRECTS = 3;
 
 // RFC 1918, loopback, link-local, CGNAT, documentation, benchmark,
-// multicast and reserved IPv4 ranges. These are rejected in the opt-in
-// public-only mode (`ALLOW_PRIVATE_ADDRESSES=0`).
+// multicast and reserved IPv4 ranges. These are rejected by default. The
+// opt-in intranet mode (`ALLOW_PRIVATE_ADDRESSES=1`) relaxes private,
+// loopback and CGNAT targets, but still rejects link-local/cloud metadata,
+// multicast, reserved and transition/tunnel ranges.
 const BLOCKED_IPV4_RANGES = [
   ['0.0.0.0', 8],
   ['10.0.0.0', 8],
@@ -65,10 +67,12 @@ const INTRANET_IPV4_RANGES = new Set(['unicast', 'private', 'loopback', 'carrier
 const INTRANET_IPV6_RANGES = new Set(['unicast', 'uniqueLocal', 'loopback']);
 const KNOWN_METADATA_ADDRESSES = new Set(['100.100.100.200']); // Alibaba Cloud; 169.254.169.254 is link-local
 
-// Default deployment target is an intranet: private, loopback and CGNAT
-// targets are allowed. Set `allowPrivateAddresses: false` (or
-// `ALLOW_PRIVATE_ADDRESSES=0`) to restore the public-only SSRF policy.
-export function createRemotePolicy({ allowPrivateAddresses = true, allowedPorts = DEFAULT_ALLOWED_PORTS } = {}) {
+// Default deployment target is the public internet: only global unicast
+// addresses and the 80/443 port allowlist are accepted. For a trusted
+// intranet, set `allowPrivateAddresses: true` (or
+// `ALLOW_PRIVATE_ADDRESSES=1`) to permit private, loopback and CGNAT targets
+// on any port while still blocking metadata/tunnel addresses.
+export function createRemotePolicy({ allowPrivateAddresses = false, allowedPorts = DEFAULT_ALLOWED_PORTS } = {}) {
   const ports = new Set();
   for (const value of allowedPorts) {
     const port = Number(value);
@@ -401,6 +405,6 @@ function blockedAddressError() {
     403,
     'REMOTE_ADDRESS_BLOCKED',
     '不允许访问该地址。',
-    '内网模式允许公网、私网、CGNAT 与本机地址；链路本地/云元数据、组播和保留地址仍会被拒绝。公网严格模式（ALLOW_PRIVATE_ADDRESSES=0）则只允许公网地址。',
+    '默认公网严格模式只允许公网 HTTP(S) 地址；如确需访问本机/内网，可在可信网络中设置 ALLOW_PRIVATE_ADDRESSES=1（内网模式仍拒绝链路本地/云元数据、组播和保留地址）。',
   );
 }
