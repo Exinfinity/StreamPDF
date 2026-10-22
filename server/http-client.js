@@ -14,8 +14,10 @@ const DEFAULT_BODY_IDLE_TIMEOUT_MS = 30_000;
 const DEFAULT_MAX_REDIRECTS = 3;
 
 // RFC 1918, loopback, link-local, CGNAT, documentation, benchmark,
-// multicast and reserved IPv4 ranges. Anything in this list must never be
-// reachable through the URL proxy.
+// multicast and reserved IPv4 ranges. These are rejected by default. The
+// opt-in intranet mode (`ALLOW_PRIVATE_ADDRESSES=1`) relaxes private,
+// loopback and CGNAT targets, but still rejects link-local/cloud metadata,
+// multicast, reserved and transition/tunnel ranges.
 const BLOCKED_IPV4_RANGES = [
   ['0.0.0.0', 8],
   ['10.0.0.0', 8],
@@ -57,6 +59,19 @@ for (const [address, prefix] of BLOCKED_IPV6_RANGES) {
   BLOCKED_V6.addSubnet(address, prefix, 'ipv6');
 }
 
+// Intranet mode is deliberately narrower than "anything goes": it allows
+// public, RFC1918/ULA private, loopback and CGNAT addresses (plus host
+// services), which covers LAN and same-host PDF sources. Link-local/cloud
+// metadata, multicast, unspecified and reserved ranges stay blocked.
+const INTRANET_IPV4_RANGES = new Set(['unicast', 'private', 'loopback', 'carrierGradeNat']);
+const INTRANET_IPV6_RANGES = new Set(['unicast', 'uniqueLocal', 'loopback']);
+const KNOWN_METADATA_ADDRESSES = new Set(['100.100.100.200']); // Alibaba Cloud; 169.254.169.254 is link-local
+
+// Default deployment target is the public internet: only global unicast
+// addresses and the 80/443 port allowlist are accepted. For a trusted
+// intranet, set `allowPrivateAddresses: true` (or
+// `ALLOW_PRIVATE_ADDRESSES=1`) to permit private, loopback and CGNAT targets
+// on any port while still blocking metadata/tunnel addresses.
 export function createRemotePolicy({ allowPrivateAddresses = false, allowedPorts = DEFAULT_ALLOWED_PORTS } = {}) {
   const ports = new Set();
   for (const value of allowedPorts) {
@@ -78,8 +93,9 @@ export const DEFAULT_REMOTE_POLICY = createRemotePolicy();
 
 /**
  * Validate a user supplied URL before it can reach the network layer.
- * This deliberately rejects credentials in the URL, non-HTTP(S) schemes and
- * ports outside the configured allow list.
+ * This deliberately rejects credentials in the URL and non-HTTP(S) schemes.
+ * Ports outside the allow list are only rejected in the public-only mode;
+ * intranet mode permits any port so LAN/host services remain reachable.
  */
 export function parseRemoteUrl(raw, policy = DEFAULT_REMOTE_POLICY) {
   let url;
@@ -96,13 +112,16 @@ export function parseRemoteUrl(raw, policy = DEFAULT_REMOTE_POLICY) {
     throw new HttpError(400, 'URL_CREDENTIALS_NOT_ALLOWED', 'URL 中不能包含用户名或密码。');
   }
 
+  // In intranet mode any port is allowed so host/LAN services on non-standard
+  // ports (8080, 5000, …) can be previewed. The allowlist still applies when
+  // the operator opts into the public-only policy.
   const port = effectivePort(url);
   if (!policy.allowPrivateAddresses && !policy.allowedPorts.has(port)) {
     throw new HttpError(
       403,
       'URL_PORT_NOT_ALLOWED',
       '不允许访问该端口。',
-      `默认只允许 ${[...policy.allowedPorts].join('、')} 端口。`,
+      `公网严格模式只允许 ${[...policy.allowedPorts].join('、')} 端口。`,
     );
   }
 
@@ -121,7 +140,7 @@ export async function resolveRemoteAddress(hostname, policy = DEFAULT_REMOTE_POL
   const literalFamily = net.isIP(host);
 
   if (literalFamily !== 0) {
-    if (!policy.allowPrivateAddresses && !isPublicAddress(host)) {
+    if (!isAllowedAddress(host, policy)) {
       throw blockedAddressError();
     }
     return { address: host, family: literalFamily };
@@ -137,13 +156,13 @@ export async function resolveRemoteAddress(hostname, policy = DEFAULT_REMOTE_POL
     throw new HttpError(502, 'REMOTE_DNS_FAILED', '无法解析远端的域名。');
   }
 
-  // Reject the whole host if *any* record is non-public. A hostname that
-  // alternates between public and private records must not be usable.
-  if (!policy.allowPrivateAddresses) {
-    for (const record of records) {
-      if (!isPublicAddress(record.address)) {
-        throw blockedAddressError();
-      }
+  // Validate every DNS record before choosing one, so a hostname that
+  // alternates between allowed and blocked records cannot be used to slip a
+  // link-local/metadata address past the check. Intranet mode accepts
+  // split-horizon DNS that resolves an internal name to a private address.
+  for (const record of records) {
+    if (!isAllowedAddress(record.address, policy)) {
+      throw blockedAddressError();
     }
   }
 
@@ -183,12 +202,51 @@ export function isPublicAddress(address) {
 }
 
 /**
- * Minimal HTTP(S) client with SSRF protections:
+ * True for addresses that the default intranet policy may proxy: public
+ * unicast, RFC1918/CGNAT IPv4, ULA IPv6 and loopback (host services). Link-
+ * local/cloud metadata, multicast and reserved ranges remain blocked so the
+ * relaxation is limited to LAN and same-host targets.
+ */
+export function isIntranetAddress(address) {
+  let parsed;
+  try {
+    parsed = ipaddr.parse(stripBrackets(address));
+  } catch {
+    return false;
+  }
+
+  if (parsed.kind() === 'ipv6' && parsed.isIPv4MappedAddress()) {
+    parsed = parsed.toIPv4Address();
+  }
+
+  if (parsed.kind() === 'ipv4') {
+    if (!INTRANET_IPV4_RANGES.has(parsed.range())) {
+      return false;
+    }
+    return !KNOWN_METADATA_ADDRESSES.has(parsed.toString());
+  }
+
+  if (parsed.kind() === 'ipv6') {
+    return INTRANET_IPV6_RANGES.has(parsed.range());
+  }
+
+  return false;
+}
+
+function isAllowedAddress(address, policy) {
+  return policy.allowPrivateAddresses ? isIntranetAddress(address) : isPublicAddress(address);
+}
+
+/**
+ * Minimal HTTP(S) client with configurable address policy:
  * - only HTTP(S), no embedded credentials
- * - port allow list
- * - DNS results validated and pinned at connect time
+ * - port allow list in public-only mode; any port in intranet mode
+ * - DNS results pinned at connect time
  * - redirects handled manually, each hop revalidated
  * - header timeout and body idle timeout
+ *
+ * Intranet mode does not imply "no validation": scheme, credentials,
+ * redirects, DNS pinning and timeouts still apply.
  */
 export async function safeRequest(
   rawUrl,
@@ -326,7 +384,7 @@ function normalizeNetworkError(error) {
     502,
     'REMOTE_UNREACHABLE',
     '无法访问远端地址。',
-    '请确认链接可公开访问，且目标端口在允许范围内。',
+    '请确认链接可从服务器访问；公网严格模式下还需确认目标端口在允许范围内。',
   );
 }
 
@@ -347,6 +405,6 @@ function blockedAddressError() {
     403,
     'REMOTE_ADDRESS_BLOCKED',
     '不允许访问该地址。',
-    '仅允许访问公网 HTTP(S) 地址，不能访问本机、内网或云元数据地址。',
+    '默认公网严格模式只允许公网 HTTP(S) 地址；如确需访问本机/内网，可在可信网络中设置 ALLOW_PRIVATE_ADDRESSES=1（内网模式仍拒绝链路本地/云元数据、组播和保留地址）。',
   );
 }

@@ -24,6 +24,12 @@ const maxRemoteBytes = parseClampedInt(
 const documentTtlMinutes = parseClampedInt(process.env.DOCUMENT_TTL_MINUTES, 30, 1, 24 * 60);
 const maxConcurrentStreams = parseClampedInt(process.env.MAX_CONCURRENT_STREAMS, 100, 1, 1000);
 const allowedRemotePorts = parsePortList(process.env.ALLOWED_REMOTE_PORTS, [80, 443]);
+// Public-facing strict mode is the default: only global unicast addresses and
+// the ALLOWED_REMOTE_PORTS allowlist are reachable. Set
+// ALLOW_PRIVATE_ADDRESSES=1 only for a trusted intranet deployment that must
+// read PDFs from RFC1918, CGNAT, loopback or host services; link-local/cloud
+// metadata remains blocked.
+const allowPrivateAddresses = process.env.ALLOW_PRIVATE_ADDRESSES === '1';
 const trustProxy = process.env.TRUST_PROXY === '1' ? 1 : false;
 const enableMetrics = process.env.ENABLE_METRICS === '1';
 const metricsLogIntervalMinutes = parseClampedInt(
@@ -75,6 +81,7 @@ try {
     documentTtlMs: documentTtlMinutes * 60_000,
     maxConcurrentStreams,
     allowedRemotePorts,
+    allowPrivateAddresses,
     trustProxy,
     enableMetrics,
     metricsLogIntervalMs: metricsLogIntervalMinutes * 60_000,
@@ -101,6 +108,13 @@ const server = app.listen(port, host, () => {
   console.log(`  → http://${shownHost}:${port}`);
   console.log(`  监听 ${host}:${port}`);
   console.log(`  允许的 Host：${allowedHosts || 'localhost、127.0.0.1、::1（仅回环）'}`);
+  console.log(
+    `  出站地址策略：${
+      allowPrivateAddresses
+        ? '内网模式（允许私网/回环/宿主地址与任意端口）'
+        : '公网严格模式（仅公网地址 + 端口白名单）'
+    }`,
+  );
   if (allowedOrigins) {
     console.log(`  允许的 Origin：${allowedOrigins}`);
   }
@@ -115,6 +129,7 @@ const server = app.listen(port, host, () => {
     node: process.version,
     logLevel: normalizeLogLevel(process.env.LOG_LEVEL),
     publicBind: !isLoopbackHostname(host),
+    allowPrivateAddresses,
     metricsEnabled: enableMetrics,
   });
 });

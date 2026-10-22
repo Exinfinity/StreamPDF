@@ -353,7 +353,7 @@ function remoteStatusError(status) {
       502,
       'REMOTE_FORBIDDEN',
       '远端拒绝访问。',
-      '该链接可能需要登录或签名；请使用可直接访问的公开链接。',
+      '该链接可能需要登录或签名；请使用可直接访问的直链。',
     );
   }
   if (status === 404) {

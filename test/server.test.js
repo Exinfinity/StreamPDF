@@ -26,13 +26,15 @@ test.before(async () => {
   payload.write('%%EOF\n', PDF_SIZE - 6, 'latin1');
 
   remote = await startRemoteFixture(payload);
+  // Opt-in intranet mode: the fixture listens on loopback with a random port,
+  // so this exercises private/loopback access with no port allowlist.
   main = await startApp({
     allowPrivateAddresses: true,
-    allowedRemotePorts: [remote.port],
     documentRateLimit: false,
     contentRateLimit: false,
     deleteRateLimit: false,
   });
+  // Default public-only mode, used to regression-test the strict SSRF policy.
   secure = await startApp({
     documentRateLimit: false,
     contentRateLimit: false,
@@ -123,7 +125,36 @@ test('removes server-side path reads entirely', async () => {
 
 /* ------------------------------------------------------------------ P0-2 SSRF */
 
-test('blocks loopback, private, link-local and cloud metadata targets', async () => {
+test('opt-in intranet mode allows loopback/host targets on non-standard ports', async () => {
+  const created = await api(main, '/api/documents', {
+    method: 'POST',
+    body: { source: 'url', value: remote.rangeUrl },
+  });
+  assert.equal(created.status, 201, JSON.stringify(created.body));
+  assert.equal(created.body.document.size, PDF_SIZE);
+  await api(main, `/api/documents/${created.body.document.id}`, { method: 'DELETE' });
+});
+
+test('opt-in intranet mode still blocks link-local, cloud metadata and reserved targets', async () => {
+  for (const value of [
+    'http://169.254.169.254/latest/meta-data/',
+    'http://100.100.100.200/latest/meta-data/',
+    'http://[fe80::1]/',
+    'http://0.0.0.0/',
+    'http://224.0.0.1/',
+    'http://[64:ff9b::7f00:1]/',
+    'http://[2002:7f00:1::]/',
+  ]) {
+    const response = await api(main, '/api/documents', {
+      method: 'POST',
+      body: { source: 'url', value },
+    });
+    assert.equal(response.status, 403, `${value} should stay blocked in intranet mode`);
+    assert.equal(response.body.error.code, 'REMOTE_ADDRESS_BLOCKED', value);
+  }
+});
+
+test('default public-only mode blocks loopback, private, link-local and cloud metadata targets', async () => {
   const blocked = [
     'http://127.0.0.1/',
     'http://localhost/',
@@ -150,7 +181,7 @@ test('blocks loopback, private, link-local and cloud metadata targets', async ()
   }
 });
 
-test('rejects disallowed ports, embedded credentials and unsafe schemes', async () => {
+test('default public-only mode rejects disallowed ports, embedded credentials and unsafe schemes', async () => {
   const port = await api(secure, '/api/documents', {
     method: 'POST',
     body: { source: 'url', value: 'http://example.com:8080/book.pdf' },

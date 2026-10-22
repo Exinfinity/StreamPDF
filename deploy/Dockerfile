@@ -3,7 +3,7 @@
 # Build:
 #   docker build -f deploy/Dockerfile -t streampdf:local .
 #
-# Run (the app refuses to start on a public bind without both secrets):
+# Run (the app refuses to start on a non-loopback bind without both secrets):
 #   docker run --rm --init --read-only --tmpfs /tmp:size=64m \
 #     --cap-drop ALL --security-opt no-new-privileges \
 #     -p 127.0.0.1:3000:3000 \
