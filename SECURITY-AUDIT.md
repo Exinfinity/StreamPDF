@@ -1,11 +1,11 @@
-# StreamPDF 公网暴露安全审计报告（含 2026-10-21 修复复核）
+# StreamPDF 公网暴露安全审计报告（含 2026-10-21 / 2026-10-22 修复复核）
 
 - **审计对象**：`/mnt/h/Projects/StreamPDFPreviewer`（commit `4edb5f7`）
 - **审计日期**：2026-10-21
-- **复核日期**：2026-10-21（P0 修复后）
+- **复核日期**：2026-10-21（P0 修复后）、2026-10-22（P2/P3 加固后）
 - **审计范围**：`server/`、`public/`、`package.json` / `package-lock.json`、运行配置与 README
 - **审计方法**：源码审计 + `npm audit --omit=dev` + 在 `127.0.0.1` 临时端口上的动态验证（未修改生产数据）
-- **复核结论**：**P0-1 ~ P0-5 与 P1-1 ~ P1-3 均已修复**（URL-only 模式、SSRF 防护、Bearer 认证、PDF.js 升级、资源限制、Host 白名单、信息脱敏、移除自动打开）。`npm test` 34/34 通过，`npm audit --omit=dev` 为 0 漏洞。公网部署前仍建议在反向代理层限制 `Host`、完成 P2/P3 加固。
+- **复核结论**：**P0-1 ~ P0-5、P1-1 ~ P1-3、P2-1 ~ P2-5 与 P3 加固项均已处理**（URL-only 模式、SSRF 防护、Bearer 认证、PDF.js 升级、资源限制、Host 白名单、信息脱敏、移除自动打开；安全响应头、目录链接白名单、CSRF/Origin 防护、临时目录清理、文件名/双向文本加固；结构化脱敏日志、指标、CI/依赖扫描、SECURITY.md、systemd/nginx/Docker 加固模板）。`npm test` 67/67 通过，`npm audit --omit=dev` 为 0 漏洞。公网部署前仍应在反向代理层限制 `Host` 并完成主机/网络层出站限制。
 - **原始结论**：修复前版本不能直接暴露到公网。至少存在 3 个未认证即可利用的阻断级问题（任意本地 PDF 读取、SSRF、全站无认证），以及拒绝服务、Host 头/DNS rebinding、信息泄露等问题。
 
 ---
@@ -22,12 +22,12 @@
 | P1-1 | **高** | `Host` 头未校验，存在 DNS rebinding 前置条件 | `server/host.js`、`server/app.js`、`server/index.js` | 恶意网页可借 DNS rebinding 读取本地实例 | **已修复（2026-10-21 第二轮）**：Host 白名单，不匹配返回 421；非回环绑定必须配置 `ALLOWED_HOSTS` |
 | P1-2 | **高** | 信息泄露：绝对路径、文件系统错误、内网主机/状态、会话计数 | `server/documents.js`、`server/sources.js` | 辅助 LFI/SSRF，泄露服务器布局 | **已修复（2026-10-21 第二轮）**：元数据最小化，远端错误不再回显状态码/主机/端口，API 全部 `no-store` |
 | P1-3 | **中** | `?path=` / `?url=` / `?open=` 在页面加载时自动触发服务端读取 | `public/js/app.js` | 诱导点击即可触发 LFI/SSRF（drive-by） | **已修复**：移除全部自动打开参数，并加入静态回归测试 |
-| P2-1 | **中** | 安全响应头不完整；敏感 PDF 可缓存 1 小时 | `server/app.js:309-353` | 缺少 HSTS/COOP/CORP/Permissions-Policy，缓存残留 | **已修复**：补齐安全头，内容响应 `no-store` + `sandbox` CSP |
-| P2-2 | **中** | PDF 目录项 `item.url` 未校验协议即 `window.open` | `public/js/app.js:804-824` | 恶意 PDF 可能触发 `javascript:`/自定义协议 | **已修复**：outline URL 仅允许 http/https/mailto |
-| P2-3 | **中** | 无 CSRF/Origin 防护；若日后加 Cookie 认证会立即中招 | `server/app.js:54-85` | 当前无 Cookie，风险较低，但设计上应提前防护 | **已规避**：使用 Authorization 头而非 Cookie；若改 Cookie 需补 CSRF |
-| P2-4 | **中** | 临时镜像清理不完整（崩溃/退出残留），镜像上限可配置得过大 | `server/documents.js:67-84`、`server/index.js:27-48` | 磁盘残留与配额风险 | **已修复**：取消临时镜像落盘 |
-| P2-5 | **低** | Windows 下 `PDF_ALLOWED_ROOTS` 大小写/短文件名比较问题 | `server/sources.js:482` | 可能误拒或边界绕过（取决于平台） | **已失效**：本地路径模式已删除 |
-| P3 | **加固** | 依赖 CI、容器/主机加固、日志脱敏、监控告警 | 部署层 | 降低长期风险 | **待完成**：部署层持续加固 |
+| P2-1 | **中** | 安全响应头不完整；敏感 PDF 可缓存 1 小时 | `server/app.js:309-353` | 缺少 HSTS/COOP/CORP/Permissions-Policy，缓存残留 | **已修复（2026-10-22 复核）**：补齐安全头，内容响应 `no-store` + `sandbox` CSP |
+| P2-2 | **中** | PDF 目录项 `item.url` 未校验协议即 `window.open` | `public/js/app.js:804-824` | 恶意 PDF 可能触发 `javascript:`/自定义协议 | **已修复（2026-10-22 复核）**：仅允许 http/https/mailto，拒绝内嵌凭据，保留 `noopener,noreferrer` |
+| P2-3 | **中** | 无 CSRF/Origin 防护；若日后加 Cookie 认证会立即中招 | `server/app.js:54-85` | 当前无 Cookie，风险较低，但设计上应提前防护 | **已修复（2026-10-22 复核）**：状态变更接口校验 `Origin` / `Sec-Fetch-Site`，`ALLOWED_ORIGINS` 白名单；Bearer 头认证继续规避 CSRF |
+| P2-4 | **中** | 临时镜像清理不完整（崩溃/退出残留），镜像上限可配置得过大 | `server/documents.js:67-84`、`server/index.js:27-48` | 磁盘残留与配额风险 | **已修复（2026-10-22 复核）**：取消临时镜像落盘；启动清理旧版本 `stream-pdf-*` 残留 |
+| P2-5 | **低** | Windows 下 `PDF_ALLOWED_ROOTS` 大小写/短文件名比较问题 | `server/sources.js:482` | 可能误拒或边界绕过（取决于平台） | **已失效 + 已加固**：本地路径模式已删除；文件名控制字符/双向覆盖/长度已加固 |
+| P3 | **加固** | 依赖 CI、容器/主机加固、日志脱敏、监控告警 | 部署层 | 降低长期风险 | **已修复（2026-10-22 复核）**：CI/Dependabot、结构化脱敏日志、指标、SECURITY.md、systemd/nginx/Docker 模板 |
 
 > **级别说明**：P0 = 公网暴露前必须修复；P1 = 暴露前应修复；P2 = 首周内修复；P3 = 持续加固。
 
@@ -63,7 +63,7 @@
 - `AUTH_TOKEN` 至少 16 个可打印非空格字符；未设置时启动时随机生成并打印，不再存在无认证模式。
 - 使用 `crypto.timingSafeEqual` 比较令牌；认证失败按 IP 限流（默认 10 次/分钟），返回通用 401。
 - 前端增加访问令牌对话框，令牌仅存入 `sessionStorage`；PDF.js 通过 `httpHeaders` 携带令牌。
-- 不再使用 Cookie 会话；若未来改为 Cookie，必须同步补充 CSRF/Origin 防护（P2-3）。
+- 不再使用 Cookie 会话；若未来改为 Cookie，登录接口还必须加入 CSRF token 与 `SameSite`，但状态变更接口的 `Origin`/`Sec-Fetch-Site` 校验已在 P2-3 落地。
 
 ### P0-4 已修复：PDF.js 升级与脚本关闭
 
@@ -130,7 +130,7 @@
 
 ### 复核验证结果
 
-- `npm test`：**34 项通过，0 失败**（认证、LFI 拒绝、SSRF 地址/编码/重定向、Range 代理、限流、并发槽释放、上游超时、大小上限、Host 白名单、信息脱敏、前端无自动打开等）。
+- `npm test`：**34 项通过，0 失败**（2026-10-21 复核时；2026-10-22 加固后增至 **67 项**，见下文）。覆盖认证、LFI 拒绝、SSRF 地址/编码/重定向、Range 代理、限流、并发槽释放、上游超时、大小上限、Host 白名单、信息脱敏、安全头、Origin/CSRF、日志脱敏、指标、文件名清洗、临时目录清理、前端无自动打开等。
 - `npm audit --omit=dev`：**0 vulnerabilities**。
 - 使用 `test-pdf/大辞海：法学卷.pdf`（约 1.1 GB）经本地 Range 测试服务验证：创建文档 201、分片读取 206、`Content-Range` 正确、无认证返回 401、删除 204。
 - 使用 PDF.js 6 实际解析该 1.1 GB PDF 成功（868 页）。
@@ -138,11 +138,82 @@
 - 未设置 `ALLOWED_HOSTS` 且 `HOST=0.0.0.0` 时进程拒绝启动；设置后正常监听。
 - 环境无可用的图形浏览器，未做真实浏览器 GUI 点击回归；前端通过语法检查与静态回归测试，服务端/API 与 PDF.js 解析链路已验证。
 
+### P2/P3 修复复核详情（2026-10-22）
+
+#### P2-1 安全响应头与缓存
+
+- `securityHeaders()` 在原有 CSP、`X-Content-Type-Options`、`Referrer-Policy`、`X-Frame-Options`、COOP/CORP、`X-Permitted-Cross-Domain-Policies` 基础上，新增 `X-DNS-Prefetch-Control: off`、`Origin-Agent-Cluster: ?1`，并扩展 `Permissions-Policy`（`accelerometer`、`autoplay`、`browsing-topics`、`camera`、`display-capture`、`geolocation`、`gyroscope`、`interest-cohort`、`magnetometer`、`microphone`、`midi`、`payment`、`usb`）。
+- CSP 增加 `manifest-src 'self'`，保留 `form-action 'self'`、`object-src 'none'`、`base-uri 'none'`、`frame-ancestors 'none'`，仍无 `'unsafe-eval'` / 脚本 `'unsafe-inline'`。
+- `Strict-Transport-Security` 仅在 `ENABLE_HSTS=1` 时发送，避免在明文 HTTP 上误发。
+- `/api/*` 与错误响应统一 `Cache-Control: no-store`；`/content` 使用 `private, no-store` 与 `Content-Security-Policy: sandbox; default-src 'none'`。
+- 所有响应新增 `X-Request-Id`，便于与代理/SIEM 日志关联。
+
+#### P2-2 PDF 目录链接协议白名单
+
+- `safeOutlineUrl()` 只允许 `http:`、`https:`、`mailto:`；拒绝 `javascript:`、`data:`、`file:`、`blob:` 与自定义协议。
+- 额外拒绝 URL 内嵌用户名/密码、空 hostname 与超长（>4096 字符）链接。
+- 仍使用 `window.open(target, '_blank', 'noopener,noreferrer')`；解析失败时提示“该书签链接被拒绝”，不执行任何跳转。
+- 新增静态回归测试，禁止 `window.open(item.url, ...)` 重新出现。
+
+#### P2-3 CSRF / Origin 防护
+
+- 新增 `server/origin-guard.js`，在 Host 校验之后、路由之前对所有 `/api/*` 状态变更方法（非 GET/HEAD/OPTIONS）执行：
+  - `Sec-Fetch-Site: cross-site` 拒绝；未知值拒绝；
+  - `Origin` 缺失（curl/服务端调用）放行，但仍需 Bearer 令牌；
+  - `Origin: null`、非法协议、带路径/查询/凭据的 Origin 拒绝；
+  - Origin 的 hostname 必须与请求 `Host` 一致（端口同时出现时必须一致），或在 `ALLOWED_ORIGINS` 白名单内。
+- `ALLOWED_ORIGINS` 仅接受逗号分隔的 `scheme://host[:port]`；通配符、路径、查询、凭据、非 HTTP(S) 协议在启动时报 `ALLOWED_ORIGINS_INVALID`。
+- 命中拒绝时返回 `403 CROSS_SITE_REQUEST`，并记录脱敏的 `request.cross_site_blocked` 事件。
+- 该防护是纵深防御：当前 Bearer 头不会被浏览器自动附加；若未来切换到 Cookie 会话，CSRF 防线已就位。
+
+#### P2-4 临时镜像残留
+
+- 当前版本本就不落盘（不支持 Range 的远端直接 `422 REMOTE_NO_RANGE`）。
+- 新增 `server/temp-cleanup.js`：启动时扫描系统临时目录，只匹配 `^stream-pdf-[A-Za-z0-9]{6}$`、只删除超过 24 小时的**真实目录**（`Dirent.isDirectory()` + `lstat`，不跟随符号链接），失败仅记录告警，不影响启动。
+- 优雅退出继续调用 `store.cleanupAll()`；临时目录清理结果写入结构化日志 `temp.cleanup_done`。
+- 新增单元测试覆盖旧目录、新目录、无前缀目录、同名文件、符号链接等场景。
+
+#### P2-5 文件名与双向文本加固
+
+- 路径模式已删除，Windows 路径白名单比较问题不再适用。
+- 新增 `server/filename.js`，统一清洗远端 `Content-Disposition` 文件名、outline 显示文本与 `Content-Disposition` 响应头：
+  - 移除 C0/C1 控制字符与 Unicode 双向覆盖字符（`U+202A–U+202E`、`U+2066–U+2069`、`U+200E/U+200F`）；
+  - 替换 `\ / : * ? " < > |` 等文件系统/头部元字符；
+  - 限制为 160 个码点，避免超长头部与 UI 欺骗；
+  - 空名、纯点号、纯空白回退到“未命名文档.pdf”。
+- 新增文件名与显示文本单元测试（含 emoji 多字节截断、RTL 覆盖字符、超长名称）。
+
+#### P3 持续加固
+
+- **日志**：新增 `server/logger.js`，单行 JSON 输出，自动脱敏 `Authorization`/`Cookie`/`token`/`secret`/`password`/`session`/`credential`/`signature` 等键；URL 只保留 `scheme://host/path`（丢弃 userinfo/query/fragment）；引号包裹的绝对路径只保留 basename；移除控制字符与双向覆盖字符；错误只记录 `name`/`code`/`status`/`message`，不记录堆栈。日志写入失败不会影响请求。事件覆盖 `auth.failed`、`document.opened`、`document.open_failed`、`document.deleted`、`rate.limited`、`host.rejected`、`request.cross_site_blocked`、`stream.failed`、`request.error`、`server.shutdown` 等。
+- **令牌**：非回环绑定必须显式设置 `AUTH_TOKEN`；交互式终端才打印随机令牌，非交互进程写入 `./.auth-token`（`0600`），写入失败拒绝启动，避免令牌进入 journal/容器日志。
+- **监控**：可选 `ENABLE_METRICS=1` 开放需认证的 `GET /api/metrics`，返回文档数、活动/峰值流、请求/4xx/5xx、认证失败、限流、上游失败、已发送字节等聚合值，并带 `Cache-Control: no-store`；默认关闭。另支持 `METRICS_LOG_INTERVAL_MINUTES` 周期性输出 `metrics.snapshot`，供 SIEM 采集。
+- **依赖与供应链**：新增 `.github/workflows/security.yml`（Node 22.13/24 矩阵执行 `npm ci`、`npm test`、`npm audit --omit=dev --audit-level=high`，PR 触发 dependency-review）与 `.github/dependabot.yml`（npm + GitHub Actions 每周更新）。
+- **部署模板**：新增 `deploy/streampdf.service`（非 root、`NoNewPrivileges`、`PrivateTmp`、`ProtectSystem=strict`、`ProtectHome`、空 capability、`SystemCallFilter`、`MemoryMax`/`TasksMax`/`LimitNOFILE`）、`deploy/nginx.conf`（TLS、HSTS、限流、连接数、64k 请求体、`proxy_buffering off`、原始 Host）、`deploy/Dockerfile`（非 root、`npm ci --omit=dev --ignore-scripts`、healthcheck）与 `deploy/docker-compose.yml`（`read_only`、`tmpfs`、`cap_drop ALL`、`no-new-privileges`、pids/memory/cpu 限制、仅绑定回环）。
+- **文档与仓库卫生**：新增 `SECURITY.md`（威胁模型、支持版本、漏洞上报、公网部署清单）；`.gitignore` 增加 `.env`、`.env.*`、`*.pem`、`*.key`、`*.crt`、`*.p12`、`*.pfx`、`.auth-token`；新增 `.dockerignore` 防止构建上下文带入密钥与测试数据。
+
+#### 新增/调整的环境变量
+
+| 环境变量 | 默认值 | 说明 |
+| --- | --- | --- |
+| `ALLOWED_ORIGINS` | 空 | 逗号分隔的允许跨源前端源；默认仅同源 |
+| `ENABLE_METRICS` | 空 | `1` 时开放认证的 `GET /api/metrics` |
+| `LOG_LEVEL` | `info` | `debug` / `info` / `warn` / `error` / `silent` |
+| `METRICS_LOG_INTERVAL_MINUTES` | `15` | 指标快照日志间隔，`0` 关闭 |
+
+#### 验证结果（2026-10-22）
+
+- `npm test`：**67 项通过，0 失败**。新增覆盖：安全头、HSTS 开关、跨站 Origin/Sec-Fetch-Site、`ALLOWED_ORIGINS`、指标接口、日志脱敏、文件名/双向文本、临时目录清理、CI/部署模板/`.gitignore` 静态检查。
+- `npm audit --omit=dev`：**0 vulnerabilities**。
+- 动态验证：同源 `Origin` 通过、`evil.example` / `Origin: null` / 跨站 `Sec-Fetch-Site` 返回 `403 CROSS_SITE_REQUEST`；配置 `ALLOWED_ORIGINS` 后对应源通过；`/api/metrics` 默认 404、开启后未认证 401、认证后 200 且 `no-store`；非白名单 Host 仍返回 421；日志中未出现 Authorization/token/URL query/绝对路径。
+- 未在真实图形浏览器中做点击回归（环境限制）；前端通过语法检查与静态回归测试，服务端/API 已实测。
+
 ### 复核后仍待处理
 
-- **P2-3**：当前 Bearer 头认证天然规避 CSRF；若将来改用 Cookie 会话，必须增加 CSRF token 与 `Origin`/`Sec-Fetch-Site` 校验。
-- **P3**：CI 依赖扫描、容器/systemd 加固、日志脱敏、监控告警、出站防火墙仍需在部署层完成。
-- 反向代理仍应配置 `server_name`/Host 白名单并传递正确 `Host`；应用层白名单用于纵深防御，不替代代理配置。
+- 部署层仍应完成：反向代理 `server_name`/Host 白名单、TLS 与 HSTS、出站防火墙（阻断到 RFC1918、`169.254.0.0/16` 和本机）、主机/容器资源限制、SIEM/告警接入。模板见 `deploy/` 与 `SECURITY.md`。
+- 应用层 Host 白名单与 Origin 校验用于纵深防御，不替代代理配置；代理必须传递原始 `Host`。
+- 若未来改用 Cookie 会话，需同时在登录接口加入 CSRF token、`SameSite=Strict`、登录限速；现有 Origin 防护已覆盖大部分场景。
+
 
 ---
 
@@ -844,6 +915,8 @@ if (allowAutoOpen && autoUrl) { ... }
 
 ### P2-1 安全响应头不完整；敏感内容可缓存
 
+> **修复状态（2026-10-22 复核）**：**已修复**。安全头已补齐，`/content` 使用 `no-store` + sandbox CSP；详见 [P2/P3 修复复核详情](#p2p3-修复复核详情2026-10-22)。以下保留原始发现问题与建议。
+
 **位置**
 
 - `server/app.js:309-319` `contentHeaders()`
@@ -935,6 +1008,8 @@ function securityHeaders(_req, res, next) {
 
 ### P2-2 PDF 目录项 URL 未校验协议
 
+> **修复状态（2026-10-22 复核）**：**已修复**。outline URL 仅允许 `http:` / `https:` / `mailto:`，并拒绝内嵌凭据；详见 [P2/P3 修复复核详情](#p2p3-修复复核详情2026-10-22)。以下保留原始发现问题与建议。
+
 **位置**
 
 - `public/js/app.js:804-824`
@@ -983,6 +1058,8 @@ if (target) {
 
 ### P2-3 无 CSRF/Origin 防护（为未来认证预留）
 
+> **修复状态（2026-10-22 复核）**：**已修复**。状态变更接口校验 `Origin` / `Sec-Fetch-Site`，支持 `ALLOWED_ORIGINS`；详见 [P2/P3 修复复核详情](#p2p3-修复复核详情2026-10-22)。以下保留原始发现问题与建议。
+
 **位置**
 
 - `server/app.js:54-85`：`POST` / `DELETE` 没有任何 CSRF token 或 `Origin` 校验。
@@ -1011,6 +1088,8 @@ if (target) {
 ---
 
 ### P2-4 临时镜像清理与上限
+
+> **修复状态（2026-10-22 复核）**：**已修复**。临时镜像落盘已移除；启动时清理旧版本 `stream-pdf-*` 残留；详见 [P2/P3 修复复核详情](#p2p3-修复复核详情2026-10-22)。以下保留原始发现问题与建议。
 
 **位置**
 
@@ -1064,6 +1143,8 @@ async function shutdown(signal) {
 
 ### P2-5 Windows 路径白名单比较
 
+> **修复状态（2026-10-22 复核）**：**已失效并加固**。本地路径模式已删除，路径白名单问题不再适用；文件名/显示文本的控制字符、双向覆盖与长度限制已加固；详见 [P2/P3 修复复核详情](#p2p3-修复复核详情2026-10-22)。以下保留原始发现问题与建议。
+
 **位置**
 
 - `server/sources.js:482`
@@ -1096,6 +1177,8 @@ const allowed =
 ---
 
 ### P3 持续加固
+
+> **修复状态（2026-10-22 复核）**：**仓库层已完成**。CI/依赖扫描、Dependabot、结构化脱敏日志、指标、`SECURITY.md`、`.gitignore`、systemd/nginx/Docker 加固模板均已落地；主机/网络层配置仍由运维执行。详见 [P2/P3 修复复核详情](#p2p3-修复复核详情2026-10-22)。以下保留原始建议。
 
 - **依赖与供应链**：`npm ci`、提交 lockfile、CI 运行 `npm audit --omit=dev`、Dependabot/Renovate、固定 Node 版本（升级 pdfjs 后 `>=22.13`）。
 - **容器/主机**：非 root、只读根文件系统、`no-new-privileges`、`cap_drop: ALL`、seccomp、`PrivateTmp`、`MemoryMax`、`TasksMax`、只读挂载 PDF 目录、出站防火墙。
@@ -1323,9 +1406,19 @@ LimitNOFILE=4096
 
 - [x] 非白名单 Host 返回 421。
 - [x] 非回环绑定且未设置 `ALLOWED_HOSTS` 时拒绝启动。
-- [ ] 跨站 POST/DELETE 被拒绝（Cookie 模式；当前无 Cookie）。
+- [x] 跨站 POST/DELETE 被拒绝（`Origin` / `Sec-Fetch-Site`；当前另有 Bearer 认证）。
+- [x] `ALLOWED_ORIGINS` 白名单生效，非法配置启动即失败。
 - [x] HSTS/COOP/CORP/Permissions-Policy 存在。
 - [x] `/content` 直接导航带 `sandbox` CSP。
+
+### 日志 / 监控 / 供应链
+
+- [x] 结构化 JSON 日志，自动脱敏 token/URL query/绝对路径/控制字符。
+- [x] 可选 `/api/metrics` 需认证、默认关闭；周期 `metrics.snapshot`。
+- [x] CI 运行 `npm ci`、`npm test`、`npm audit --omit=dev --audit-level=high`。
+- [x] Dependabot 覆盖 npm 与 GitHub Actions。
+- [x] `SECURITY.md`、`.gitignore` 密钥规则、`.dockerignore`。
+- [x] systemd / nginx / Docker / Compose 加固模板。
 
 ### 前端
 
@@ -1357,6 +1450,10 @@ LimitNOFILE=4096
 - PDF.js 配置 `enableScripting: false`、`enableXfa: false`、`maxCanvasPixels` 限制、`disableAutoFetch`/`disableStream` 控制浏览器资源。
 - 错误处理在响应头发送后销毁连接，避免半截响应；客户端中断不会记录为 500。
 - 优雅退出有 5 秒强制超时和 `unref` 定时器。
+- 状态变更 API 校验 `Origin` / `Sec-Fetch-Site`，支持 `ALLOWED_ORIGINS`；危险 PDF outline 协议被拒绝。
+- 结构化日志自动脱敏，不记录 token/Cookie/URL query/绝对路径/堆栈；`X-Request-Id` 贯穿请求。
+- 非回环绑定强制显式 `AUTH_TOKEN`；非交互随机令牌写入 `0600` 文件而非日志。
+- CI 依赖审计与 Dependabot、`SECURITY.md`、systemd/nginx/Docker 加固模板已纳入仓库。
 
 ---
 
@@ -1384,9 +1481,9 @@ LimitNOFILE=4096
 
 11. ✅ outline URL 协议白名单。
 12. ✅ 当前使用 Authorization 头认证，不使用 Cookie；若未来改用 Cookie，必须补 CSRF/Origin 防护。
-13. ➖ 本地路径模式已删除，Windows 路径白名单问题不再适用；文件名长度/双向文本处理仍可继续加固。
-14. ⏳ CI 安全测试、依赖扫描、容器/systemd 加固、日志与监控仍需部署层落地。
-15. ⏳ `SECURITY.md` 与公网部署 runbook 仍建议补充。
+13. ✅ 本地路径模式已删除；文件名/显示文本的控制字符、Unicode 双向覆盖与长度限制已加固，Windows 路径白名单问题不再适用。
+14. ✅ CI 安全测试、依赖扫描（`npm audit` + dependency-review）、Dependabot、systemd/nginx/Docker 加固模板已加入仓库；主机/网络层配置仍由运维落地。
+15. ✅ `SECURITY.md` 与公网部署清单已补充；`README.md` 已同步 P2/P3 加固说明。
 
 ---
 
@@ -1456,9 +1553,10 @@ found 0 vulnerabilities
 
 ---
 
-**最终建议**：P0-1 ~ P0-5 与 P1-1 ~ P1-3 均已修复，但公网部署前仍应：
+**最终建议**：P0-1 ~ P0-5、P1-1 ~ P1-3、P2-1 ~ P2-5 与 P3 加固项均已在应用/仓库层处理完毕，但公网部署前仍应：
 
-1. 优先保持 `HOST=127.0.0.1`，由 nginx/Caddy 终止 TLS，并配置 `server_name`/Host 白名单；如绑定非回环地址，必须设置 `ALLOWED_HOSTS`。
-2. 设置强随机 `AUTH_TOKEN`，并在反向代理层再做认证/限流。
-3. 在主机/容器/防火墙限制出站流量，阻断到 RFC1918、`169.254.0.0/16` 和本机的连接。
-4. 完成 P3 的 CI 依赖扫描、容器/systemd 加固、日志脱敏和监控告警后再考虑全面公网开放。
+1. 优先保持 `HOST=127.0.0.1`，由 nginx/Caddy 终止 TLS，并配置 `server_name`/Host 白名单；如绑定非回环地址，必须设置 `ALLOWED_HOSTS` 与强随机 `AUTH_TOKEN`。
+2. 在反向代理层再做认证/限流，并按需配置 `ALLOWED_ORIGINS`、`ENABLE_HSTS=1`。
+3. 在主机/容器/防火墙限制出站流量，阻断到 RFC1918、`169.254.0.0/16` 和本机的连接；应用层 SSRF 校验不替代网络层控制。
+4. 采用 `deploy/` 下的 systemd/nginx/Docker 模板，完成非 root、只读根文件系统、capability 收紧、资源限制与 `SECURITY.md` 中的公网部署清单。
+5. 接入 JSON 日志/SIEM 与告警（401/429/5xx、认证失败、上游失败、文档数、并发流），必要时开启 `ENABLE_METRICS=1`。

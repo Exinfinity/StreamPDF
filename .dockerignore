@@ -1,0 +1,17 @@
+.git
+.github
+node_modules
+.npm-cache
+.cache
+coverage
+test
+test-output
+test-pdf
+.samples
+*.log
+.env
+.env.*
+*.pem
+*.key
+*.crt
+.auth-token

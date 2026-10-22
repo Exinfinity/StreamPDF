@@ -49,7 +49,7 @@ npm install
 AUTH_TOKEN='replace-with-a-long-random-token' npm start
 ```
 
-不设置 `AUTH_TOKEN` 时，服务会在每次启动时生成一个随机令牌并打印到终端。打开终端中输出的地址：
+不设置 `AUTH_TOKEN` 时，服务会在每次启动时生成一个随机令牌：交互式终端直接打印；非交互进程（systemd、容器、日志采集）写入当前目录的 `.auth-token`（权限 `0600`），写入失败则拒绝启动。生产环境请显式设置 `AUTH_TOKEN`。打开终端中输出的地址：
 
 ```text
 http://127.0.0.1:3000
@@ -104,7 +104,7 @@ node scripts/make-gb-sample-pdf.mjs test-output/huge.pdf 501 2048
 | `PORT` | `3000` | 监听端口 |
 | `HOST` | `127.0.0.1` | 监听地址。建议保持回环，前面放反向代理 |
 | `ALLOWED_HOSTS` | 空（仅 `localhost`、`127.0.0.1`、`::1`） | 逗号分隔的 Host 白名单（可带端口）。`HOST` 绑定非回环地址时必须设置；不匹配的请求返回 421 |
-| `AUTH_TOKEN` | 随机生成 | 访问令牌，至少 16 个可打印非空格字符。未设置时启动时随机生成并打印 |
+| `AUTH_TOKEN` | 随机生成 | 访问令牌，至少 16 个可打印非空格字符。非回环绑定必须显式设置；未设置时本地交互式终端打印随机值，非交互进程写入 `./.auth-token`（0600） |
 | `MAX_DOCUMENTS` | `100` | 全局文档会话数上限，超过返回 503 |
 | `MAX_DOCUMENTS_PER_IP` | `5` | 每个客户端 IP 的文档会话数上限，超过返回 429 |
 | `MAX_REMOTE_BYTES` | `2147483648`（2 GiB） | 单次内容响应的最大字节数（无 Range 的完整响应，或覆盖整个文件的单个 Range 请求）；超限中止连接 |
@@ -115,6 +115,10 @@ node scripts/make-gb-sample-pdf.mjs test-output/huge.pdf 501 2048
 | `REMOTE_HEADERS_TIMEOUT_MS` | `20000` | 连接远端、等待响应头的超时 |
 | `REMOTE_BODY_IDLE_TIMEOUT_MS` | `30000` | 读取远端响应体时的空闲超时 |
 | `ENABLE_HSTS` | 空 | 设为 `1` 时发送 HSTS 头；仅在 HTTPS 反向代理后启用 |
+| `ALLOWED_ORIGINS` | 空 | 逗号分隔的 `scheme://host[:port]`。默认只接受同源的状态变更请求；独立前端域名必须显式列出 |
+| `ENABLE_METRICS` | 空 | 设为 `1` 时开放需 Bearer 认证的 `GET /api/metrics` 聚合指标（默认关闭） |
+| `LOG_LEVEL` | `info` | 结构化日志级别：`debug`、`info`、`warn`、`error`、`silent` |
+| `METRICS_LOG_INTERVAL_MINUTES` | `15` | 周期性输出 `metrics.snapshot` 的间隔；`0` 关闭 |
 
 示例：
 
@@ -140,6 +144,10 @@ npm start
 
 `ALLOWED_HOSTS` 只做 Host 白名单匹配，不代替认证；`HOST` 非回环且未设置 `ALLOWED_HOSTS` 时进程会拒绝启动。未设置该项时只接受 `localhost`、`127.0.0.1`、`::1` 及其带端口形式，用于本地访问。
 
+绑定非回环地址时还必须显式设置 `AUTH_TOKEN`。未设置时，本地交互式终端会打印随机令牌；如果 stdout 不是终端（systemd、容器、日志采集），随机令牌会写入当前目录的 `.auth-token`（权限 `0600`），写入失败则拒绝启动——这样令牌不会进入日志。生产环境请始终使用 `AUTH_TOKEN`/`EnvironmentFile`。
+
+如果前端部署在**另一个源**（例如 `https://app.example.com` 调用 `https://pdf.example.com`），必须配置 `ALLOWED_ORIGINS=https://app.example.com`；否则状态变更接口会返回 `CROSS_SITE_REQUEST`。
+
 ## 远端 URL 的行为
 
 标准静态文件服务器、对象存储、CDN 通常都支持 Range，可以直接流式打开。
@@ -160,7 +168,8 @@ npm start
 
 ```bash
 npm run dev    # Node --watch 模式
-npm test       # 认证、SSRF、Range 代理、限流、资源上限等测试
+npm test       # 认证、SSRF、Range 代理、限流、资源上限、CSRF、日志脱敏等测试
+npm audit --omit=dev --audit-level=high   # 生产依赖漏洞扫描（CI 也会执行）
 ```
 
 测试覆盖：
@@ -177,7 +186,15 @@ npm test       # 认证、SSRF、Range 代理、限流、资源上限等测试
 - 文档元数据不包含绝对路径、owner IP、上游 URL、ETag/Last-Modified 等内部信息；
 - 远端错误不再回显上游状态码、主机名或端口；
 - 前端不再解析 `?path=` / `?url=` / `?open=`，不会在页面加载时触发服务端读取；
-- `pdfjs-dist` 版本高于 CVE 影响范围，且前端显式 `enableScripting: false`。
+- `pdfjs-dist` 版本高于 CVE 影响范围，且前端显式 `enableScripting: false`；
+- 安全响应头齐全（CSP、COOP、CORP、Permissions-Policy、HSTS 开关等）；
+- 跨站 `Origin` / `Sec-Fetch-Site` 状态变更请求被拒绝，`ALLOWED_ORIGINS` 白名单生效；
+- PDF 目录链接只允许 `http` / `https` / `mailto`，拒绝内嵌凭据；
+- 日志脱敏（Bearer token、URL query、绝对路径、控制字符/双向覆盖字符）；
+- 文件名与显示文本的控制字符、双向覆盖字符和长度限制；
+- 遗留临时镜像目录只清理本应用前缀、超过 24 小时的真实目录，且不跟随符号链接；
+- 可选的 `/api/metrics` 指标接口需认证、默认关闭；
+- CI/加固文件静态检查（`.gitignore`、`SECURITY.md`、GitHub Actions、systemd/nginx/Docker 模板）。
 
 也可以自行启动一个支持 Range 的测试 HTTP 服务来发送 `test-pdf/` 下的文件（该目录已被 `.gitignore` 忽略，不会进入仓库）。
 
@@ -186,24 +203,39 @@ npm test       # 认证、SSRF、Range 代理、限流、资源上限等测试
 ```text
 .
 ├── server/
-│   ├── index.js        # 启动、环境变量、优雅退出
-│   ├── app.js          # Express 路由、认证、Host 校验、Range 响应、安全头、限流
+│   ├── index.js        # 启动、环境变量、令牌文件、优雅退出
+│   ├── app.js          # Express 路由、认证、Host/Origin 校验、Range 响应、安全头、限流、指标
 │   ├── auth.js         # Bearer 令牌生成与常量时间校验
 │   ├── host.js         # Host 头解析、ALLOWED_HOSTS 白名单、DNS rebinding 防护
+│   ├── origin-guard.js # CSRF/Origin/Sec-Fetch-Site 防护（P2-3）
 │   ├── http-client.js  # SSRF 防护、DNS pinning、重定向校验、超时
 │   ├── documents.js    # 文档会话、统计、TTL/数量/每 IP 配额
 │   ├── rate-limit.js   # 进程内每 IP 固定窗口限流
 │   ├── sources.js      # 远端 URL 探测、Range 代理
+│   ├── filename.js     # 文件名/显示文本清洗（控制字符、双向覆盖、长度）
+│   ├── logger.js       # 结构化 JSON 日志与脱敏
+│   ├── temp-cleanup.js # 遗留临时镜像目录清理（P2-4）
 │   ├── range.js        # Range 头解析
 │   └── errors.js       # 统一错误
 ├── public/
 │   ├── index.html      # 工作台 + 官方 PDF.js 查看器容器 + 访问令牌对话框
 │   ├── styles.css      # UI、响应式布局、页面样式
 │   └── js/app.js       # PDF.js 初始化、认证、打开流程、目录、统计、交互
+├── deploy/
+│   ├── streampdf.service        # systemd 加固单元
+│   ├── streampdf.env.example    # 环境变量模板
+│   ├── nginx.conf               # TLS/限流/Host 传递参考配置
+│   ├── Dockerfile               # 非 root、只读运行时镜像
+│   └── docker-compose.yml       # cap_drop/read_only/资源限制
+├── .github/
+│   ├── workflows/security.yml   # CI：npm ci、npm test、npm audit、依赖审查
+│   └── dependabot.yml           # npm 与 Actions 每周更新
 ├── scripts/
 │   ├── make-sample-pdf.mjs     # 多页、带填充数据的普通测试文件
 │   └── make-gb-sample-pdf.mjs  # 稀疏写入的约 1 GB 流式测试文件
 ├── test/
+├── SECURITY.md          # 威胁模型、漏洞上报、公网部署清单
+├── SECURITY-AUDIT.md    # 审计报告与修复复核
 └── package.json
 ```
 
@@ -211,7 +243,7 @@ PDF.js 直接从 `node_modules/pdfjs-dist` 提供静态资源，由 `/vendor/pdf
 
 ## 安全说明
 
-本轮修复覆盖 `SECURITY-AUDIT.md` 的 5 个 P0 与 3 个 P1 问题：
+本轮修复覆盖 `SECURITY-AUDIT.md` 的 5 个 P0、3 个 P1，以及全部 P2/P3 加固项：
 
 1. **P0-1 本地文件读取（LFI）**：彻底移除 `source: "path"`、`PDF_ALLOWED_ROOTS`、本地文件探测与读取。服务端不再接受客户端提供的任何文件系统路径。
 2. **P0-2 SSRF**：只允许公网 HTTP(S) 地址；解析并校验全部 DNS 结果，拒绝回环/私网/链路本地/CGNAT/保留地址、IPv4-mapped IPv6、NAT64、6to4、Teredo；连接时 pin 住已校验 IP 防 DNS rebinding；手动处理最多 3 跳重定向并逐跳重新校验；禁止 URL 内嵌凭据；默认只允许 80/443；设置连接/响应头/响应体空闲超时。
@@ -221,14 +253,23 @@ PDF.js 直接从 `node_modules/pdfjs-dist` 提供静态资源，由 `/vendor/pdf
 6. **P1-1 Host 头 / DNS rebinding**：新增 Host 白名单中间件，不匹配返回 421；未配置时只接受回环主机名；`HOST` 绑定非回环地址时必须显式设置 `ALLOWED_HOSTS`，否则拒绝启动。
 7. **P1-2 信息泄露**：文档响应只保留 UI 必需字段，不再返回 owner IP、上游 URL、绝对路径、ETag/Last-Modified、配额等内部信息；远端错误不再回显上游状态码、主机/端口或压缩算法；所有 API 与错误响应带 `Cache-Control: no-store`。
 8. **P1-3 自动打开**：`?path=`、`?url=`、`?open=` 已在前后端彻底移除，打开文档只能由表单提交或“最近打开”点击触发，并加入静态回归测试。
+9. **P2-1 安全响应头**：补齐 HSTS（可选）、COOP/CORP、Permissions-Policy、`X-Permitted-Cross-Domain-Policies`、`X-DNS-Prefetch-Control`、`Origin-Agent-Cluster`、`form-action 'self'`；`/content` 使用 `sandbox` CSP 与 `private, no-store`。
+10. **P2-2 目录链接协议白名单**：PDF outline 链接只允许 `http:` / `https:` / `mailto:`，拒绝 `javascript:`、`data:`、`file:`、自定义协议和 URL 内嵌凭据，并保留 `noopener,noreferrer`。
+11. **P2-3 CSRF/Origin**：状态变更接口校验 `Origin` 与 `Sec-Fetch-Site`，默认只接受同源；独立前端需配置 `ALLOWED_ORIGINS`。即使未来改用 Cookie 会话，也不会立刻变成 CSRF 目标。
+12. **P2-4 临时镜像清理**：当前版本不再落盘；启动时额外清理旧版本遗留的 `stream-pdf-*` 目录（仅本应用前缀、超过 24 小时、真实目录、不跟随符号链接）。
+13. **P2-5 文件名/路径加固**：文件名与显示文本移除控制字符和 Unicode 双向覆盖字符，限制长度，处理 Windows 保留字符；本地路径模式已不存在，Windows 路径比较问题失效。
+14. **P3 持续加固**：结构化 JSON 日志自动脱敏（token/URL query/绝对路径/控制字符）、`X-Request-Id`、可选的认证指标接口与周期快照、CI 依赖审计与 Dependabot、`SECURITY.md`、`.gitignore` 密钥规则、systemd/nginx/Docker 加固模板；非回环绑定强制显式 `AUTH_TOKEN`，非交互随机令牌写入 `0600` 文件而非日志。
 
 部署建议：
 
-- 保持 `HOST=127.0.0.1`，前面使用 nginx/Caddy 终止 TLS 并做认证/限流；如必须绑定非回环地址，设置 `ALLOWED_HOSTS` 且让代理传递原始 `Host`。
-- 始终设置强随机 `AUTH_TOKEN`，不要通过 URL 传递令牌。
+- 保持 `HOST=127.0.0.1`，前面使用 nginx/Caddy 终止 TLS 并做认证/限流；如必须绑定非回环地址，设置 `ALLOWED_HOSTS` 与 `AUTH_TOKEN`，且让代理传递原始 `Host`。
+- 始终设置强随机 `AUTH_TOKEN`，不要通过 URL 传递令牌；生产环境不要依赖自动生成的随机令牌。
 - 在主机/容器/防火墙层限制出站流量，禁止到 RFC1918、`169.254.0.0/16`、本机的出站访问。
 - 不要为了访问内网 PDF 而放宽 SSRF 校验；本项目按“只允许公网 URL”设计。
-- 监控 401/429/5xx、文档数、活动连接和上游失败率。
+- 使用 [deploy/streampdf.service](deploy/streampdf.service)、[deploy/nginx.conf](deploy/nginx.conf)、[deploy/docker-compose.yml](deploy/docker-compose.yml) 作为加固起点。
+- 监控 401/429/5xx、文档数、活动连接、上游失败率；可开启 `ENABLE_METRICS=1` 或采集 JSON 日志中的 `metrics.snapshot`。
+- 完整威胁模型、漏洞上报方式和公网部署清单见 [SECURITY.md](SECURITY.md)。
+
 
 ## 已知限制
 

@@ -3,7 +3,7 @@
  * deployed behind a reverse proxy, so this is a second line of defence rather
  * than a replacement for proxy-level limits.
  */
-export function createRateLimiter({ windowMs = 60_000, max = 60 } = {}) {
+export function createRateLimiter({ windowMs = 60_000, max = 60, onLimited } = {}) {
   const buckets = new Map();
   const cleanup = setInterval(() => {
     const now = Date.now();
@@ -28,6 +28,13 @@ export function createRateLimiter({ windowMs = 60_000, max = 60 } = {}) {
     bucket.count += 1;
     if (bucket.count > max) {
       const retryAfter = Math.max(1, Math.ceil((bucket.resetAt - now) / 1000));
+      if (typeof onLimited === 'function') {
+        try {
+          onLimited(req, { retryAfter, max, windowMs });
+        } catch {
+          // Metrics/log hooks must not break the limiter.
+        }
+      }
       res.setHeader('Retry-After', String(retryAfter));
       res.status(429).json({
         error: {

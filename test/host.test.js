@@ -4,6 +4,7 @@ import http from 'node:http';
 import test from 'node:test';
 
 import { createApp } from '../server/app.js';
+import { silentLogger } from '../server/logger.js';
 import {
   isLoopbackHostname,
   normalizeAllowedHosts,
@@ -94,6 +95,7 @@ test('default Host allowlist accepts loopback and rejects attacker hosts', async
 async function startApp(options = {}) {
   const created = createApp({
     authToken: AUTH_TOKEN,
+    logger: silentLogger(),
     documentRateLimit: false,
     contentRateLimit: false,
     deleteRateLimit: false,

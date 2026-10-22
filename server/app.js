@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import path from 'node:path';
 import { Transform } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
@@ -8,8 +9,11 @@ import express from 'express';
 import { normalizeAuthToken, requireAuth, sendUnauthorized } from './auth.js';
 import { DocumentStore } from './documents.js';
 import { HttpError, errorPayload } from './errors.js';
+import { sanitizeDocumentName } from './filename.js';
 import { createHostGuard } from './host.js';
 import { createRemotePolicy } from './http-client.js';
+import { createLogger, basename, redactUrl } from './logger.js';
+import { createOriginGuard } from './origin-guard.js';
 import { createRateLimiter, disabledLimiter } from './rate-limit.js';
 import { parseRangeHeader } from './range.js';
 import { fetchRemoteBody } from './sources.js';
@@ -19,11 +23,13 @@ const DEFAULT_PUBLIC_DIR = path.join(PROJECT_ROOT, 'public');
 const DEFAULT_PDFJS_DIR = path.join(PROJECT_ROOT, 'node_modules', 'pdfjs-dist');
 const RANGE_CHUNK_SIZE = 1024 * 1024;
 const DEFAULT_MAX_CONCURRENT_STREAMS = 100;
+const DEFAULT_METRICS_LOG_INTERVAL_MS = 15 * 60 * 1000;
 
 export function createApp(options = {}) {
   const publicDir = options.publicDir ?? DEFAULT_PUBLIC_DIR;
   const pdfjsDir = options.pdfjsDir ?? DEFAULT_PDFJS_DIR;
   const rangeChunkSize = options.rangeChunkSize ?? RANGE_CHUNK_SIZE;
+  const logger = options.logger ?? createLogger();
   const { token: authToken, generated: authTokenGenerated } = normalizeAuthToken(
     options.authToken !== undefined ? options.authToken : process.env.AUTH_TOKEN,
   );
@@ -33,6 +39,20 @@ export function createApp(options = {}) {
   // prevents Host-header cache poisoning when deployed behind a proxy.
   const allowedHosts =
     options.allowedHosts !== undefined ? options.allowedHosts : process.env.ALLOWED_HOSTS;
+
+  // P2-3: state-changing API requests must not arrive cross-site. This is
+  // defence in depth on top of the bearer token (which browsers never attach
+  // automatically) and keeps the design safe if cookie sessions are added.
+  const allowedOrigins =
+    options.allowedOrigins !== undefined
+      ? options.allowedOrigins
+      : process.env.ALLOWED_ORIGINS;
+
+  const enableMetrics = options.enableMetrics === true;
+  const metricsLogIntervalMs =
+    options.metricsLogIntervalMs === undefined
+      ? DEFAULT_METRICS_LOG_INTERVAL_MS
+      : Math.max(0, Number(options.metricsLogIntervalMs) || 0);
 
   const remotePolicy =
     options.remotePolicy ??
@@ -53,10 +73,31 @@ export function createApp(options = {}) {
       remoteBodyIdleTimeoutMs: options.remoteBodyIdleTimeoutMs,
     });
 
-  const documentLimiter = makeLimiter(options.documentRateLimit, { windowMs: 60_000, max: 10 });
-  const contentLimiter = makeLimiter(options.contentRateLimit, { windowMs: 60_000, max: 600 });
-  const deleteLimiter = makeLimiter(options.deleteRateLimit, { windowMs: 60_000, max: 30 });
-  const authFailureLimiter = makeLimiter(options.authFailureRateLimit, {
+  const metrics = {
+    requests: 0,
+    responses4xx: 0,
+    responses5xx: 0,
+    authFailures: 0,
+    rateLimited: 0,
+    documentsOpened: 0,
+    documentsOpenFailed: 0,
+    upstreamFailures: 0,
+  };
+  const startedAt = Date.now();
+
+  const documentLimiter = makeLimiter('documents.create', options.documentRateLimit, {
+    windowMs: 60_000,
+    max: 10,
+  });
+  const contentLimiter = makeLimiter('documents.content', options.contentRateLimit, {
+    windowMs: 60_000,
+    max: 600,
+  });
+  const deleteLimiter = makeLimiter('documents.delete', options.deleteRateLimit, {
+    windowMs: 60_000,
+    max: 30,
+  });
+  const authFailureLimiter = makeLimiter('auth.failure', options.authFailureRateLimit, {
     windowMs: 60_000,
     max: 10,
   });
@@ -66,6 +107,13 @@ export function createApp(options = {}) {
 
   const authenticate = requireAuth(authToken, {
     onUnauthorized(req, res) {
+      metrics.authFailures += 1;
+      logger.warn('auth.failed', {
+        requestId: req.id,
+        ip: clientAddress(req),
+        method: req.method,
+        path: req.path,
+      });
       // Rate limit only failed authentication attempts. A client that keeps
       // guessing tokens gets a 429 instead of an unlimited 401 oracle.
       authFailureLimiter(req, res, () => sendUnauthorized(res));
@@ -77,8 +125,24 @@ export function createApp(options = {}) {
   if (options.trustProxy !== undefined) {
     app.set('trust proxy', options.trustProxy);
   }
+
+  // Correlate client reports and proxy logs with structured server events.
+  app.use((req, res, next) => {
+    req.id = randomUUID();
+    res.setHeader('X-Request-Id', req.id);
+    metrics.requests += 1;
+    res.once('finish', () => {
+      if (res.statusCode >= 500) {
+        metrics.responses5xx += 1;
+      } else if (res.statusCode >= 400) {
+        metrics.responses4xx += 1;
+      }
+    });
+    next();
+  });
   app.use(securityHeaders);
-  app.use(createHostGuard(allowedHosts));
+  app.use(createHostGuard(allowedHosts, logger));
+  app.use('/api', createOriginGuard({ allowedOrigins, logger }));
 
   // API responses can contain document metadata and per-session statistics;
   // never let a browser or intermediary cache them.
@@ -95,6 +159,16 @@ export function createApp(options = {}) {
   // Every other API endpoint, including configuration and document content,
   // requires a shared bearer token. Failed attempts are rate limited.
   app.use('/api', authenticate);
+
+  if (enableMetrics) {
+    // Opt-in, authenticated aggregate counters for Prometheus-style scraping
+    // or a proxy-side probe. Kept off by default to avoid an unnecessary
+    // information surface.
+    app.get('/api/metrics', (_req, res) => {
+      res.setHeader('Cache-Control', 'no-store');
+      res.json({ metrics: collectMetrics() });
+    });
+  }
 
   // Parse JSON only after authentication, so unauthenticated clients cannot
   // spend CPU/memory on request bodies.
@@ -127,9 +201,30 @@ export function createApp(options = {}) {
       throw new HttpError(400, 'SOURCE_TOO_LONG', 'URL 过长。');
     }
 
-    const doc = await store.open({
-      value: body.value,
+    let doc;
+    try {
+      doc = await store.open({
+        value: body.value,
+        ip: clientAddress(req),
+      });
+    } catch (error) {
+      metrics.documentsOpenFailed += 1;
+      logger.warn('document.open_failed', {
+        requestId: req.id,
+        ip: clientAddress(req),
+        code: error?.code ?? 'INTERNAL',
+        target: redactTarget(body.value),
+      });
+      throw error;
+    }
+
+    metrics.documentsOpened += 1;
+    logger.info('document.opened', {
+      requestId: req.id,
       ip: clientAddress(req),
+      documentId: doc.id,
+      size: doc.size,
+      display: doc.display,
     });
     res.status(201).json({ document: store.publicInfo(doc) });
   });
@@ -147,12 +242,18 @@ export function createApp(options = {}) {
   });
 
   app.delete('/api/documents/:id', deleteLimiter, (req, res) => {
-    store.remove(req.params.id);
+    const removed = store.remove(req.params.id);
+    logger.info('document.deleted', {
+      requestId: req.id,
+      ip: clientAddress(req),
+      documentId: req.params.id,
+      removed,
+    });
     res.status(204).end();
   });
 
   app.get('/api/documents/:id/content', contentLimiter, streamSlot, (req, res, next) => {
-    handleContent({ req, res, next, store });
+    handleContent({ req, res, next, store, logger, metrics });
   });
 
   app.head('/api/documents/:id/content', contentLimiter, streamSlot, (req, res, next) => {
@@ -215,7 +316,7 @@ export function createApp(options = {}) {
     res.status(404).type('text/plain; charset=utf-8').send('404 Not Found');
   });
 
-  app.use((error, _req, res, _next) => {
+  app.use((error, req, res, _next) => {
     if (res.headersSent) {
       res.destroy();
       return;
@@ -236,16 +337,47 @@ export function createApp(options = {}) {
     res.setHeader('Cache-Control', 'no-store');
 
     let normalized = error;
+    let loggedUnexpected = false;
     if (error?.type === 'entity.parse.failed') {
       normalized = new HttpError(400, 'INVALID_JSON', '请求体不是有效的 JSON。');
     } else if (error?.type === 'entity.too.large') {
       normalized = new HttpError(413, 'PAYLOAD_TOO_LARGE', '请求体过大。');
-    } else if (!(error instanceof HttpError)) {
-      console.error('[stream-pdf] unhandled error:', error);
+    } else if (error instanceof HttpError) {
+      // Keep semantic 4xx/5xx errors from upstream/content paths.
+    } else {
+      logger.error('request.failed', {
+        requestId: req.id,
+        method: req.method,
+        path: req.path,
+        error,
+        status: 500,
+      });
+      loggedUnexpected = true;
       normalized = new HttpError(500, 'INTERNAL', '服务器内部错误。');
     }
 
-    res.status(normalized.status ?? 500).json(errorPayload(normalized));
+    const status = normalized.status ?? 500;
+    const code = String(normalized.code ?? 'INTERNAL');
+    if (code.startsWith('REMOTE_')) {
+      metrics.upstreamFailures += 1;
+      logger.warn('upstream.failed', {
+        requestId: req.id,
+        method: req.method,
+        path: req.path,
+        status,
+        code,
+      });
+    } else if (status >= 500 && !loggedUnexpected) {
+      logger.warn('request.error', {
+        requestId: req.id,
+        method: req.method,
+        path: req.path,
+        status,
+        code,
+      });
+    }
+
+    res.status(status).json(errorPayload(normalized));
   });
 
   // Release one concurrency slot as soon as the response is done.
@@ -258,9 +390,11 @@ export function createApp(options = {}) {
     }
 
     if (activeStreams >= maxConcurrentStreams) {
-      console.warn(
-        `[stream-pdf] concurrent stream limit reached (${activeStreams}/${maxConcurrentStreams})`,
-      );
+      logger.warn('stream.limit_reached', {
+        requestId: req.id,
+        active: activeStreams,
+        max: maxConcurrentStreams,
+      });
       res.setHeader('Retry-After', '5');
       res.status(503).json({
         error: {
@@ -288,32 +422,80 @@ export function createApp(options = {}) {
     next();
   }
 
-  function makeLimiter(settings, defaults) {
+  function makeLimiter(scope, settings, defaults) {
     if (settings === false) {
       return disabledLimiter();
     }
-    return createRateLimiter({ ...defaults, ...(settings ?? {}) });
+    return createRateLimiter({
+      ...defaults,
+      ...(settings ?? {}),
+      onLimited(req, details) {
+        metrics.rateLimited += 1;
+        logger.warn('rate.limited', {
+          requestId: req.id,
+          ip: clientAddress(req),
+          method: req.method,
+          path: req.path,
+          scope,
+          retryAfter: details?.retryAfter,
+        });
+      },
+    });
+  }
+
+  function collectMetrics() {
+    let bytesServed = 0;
+    let activeRequests = 0;
+    for (const doc of store.docs.values()) {
+      bytesServed += doc.stats.bytesServed;
+      activeRequests += doc.stats.activeRequests;
+    }
+    return {
+      uptimeSeconds: Math.floor((Date.now() - startedAt) / 1000),
+      documents: store.docs.size,
+      clientBuckets: store.ipCounts.size,
+      activeStreams,
+      peakStreams,
+      maxConcurrentStreams,
+      activeRequests,
+      bytesServed,
+      ...metrics,
+    };
+  }
+
+  let metricsTimer = null;
+  if (metricsLogIntervalMs > 0) {
+    metricsTimer = setInterval(() => {
+      logger.info('metrics.snapshot', collectMetrics());
+    }, metricsLogIntervalMs);
+    metricsTimer.unref?.();
   }
 
   return {
     app,
     store,
+    logger,
     authToken,
     authTokenGenerated,
     getStreamStats() {
       return { active: activeStreams, peak: peakStreams, max: maxConcurrentStreams };
     },
+    getMetrics: collectMetrics,
     stop() {
       store.stop();
       documentLimiter.stop?.();
       contentLimiter.stop?.();
       deleteLimiter.stop?.();
       authFailureLimiter.stop?.();
+      if (metricsTimer) {
+        clearInterval(metricsTimer);
+        metricsTimer = null;
+      }
     },
   };
 }
 
-function handleContent({ req, res, next, store }) {
+function handleContent({ req, res, next, store, logger, metrics }) {
   let doc;
   try {
     doc = store.require(req.params.id);
@@ -425,10 +607,20 @@ function handleContent({ req, res, next, store }) {
         res.destroy();
         return;
       }
-      console.error('[stream-pdf] stream failed:', error);
       if (!res.headersSent) {
         next(error);
       } else {
+        // The error handler cannot send a response any more; record the
+        // failure and tear the connection down instead of truncating silently.
+        if (typeof error?.code === 'string' && error.code.startsWith('REMOTE_')) {
+          metrics.upstreamFailures += 1;
+        }
+        logger?.error?.('stream.failed', {
+          requestId: req.id,
+          documentId: doc.id,
+          code: error?.code ?? 'INTERNAL',
+          error,
+        });
         res.destroy();
       }
     }
@@ -467,10 +659,12 @@ function contentHeaders(doc, download) {
 }
 
 function buildContentDisposition(name, download) {
-  const fallback = String(name || 'document.pdf')
+  const safeName = sanitizeDocumentName(name);
+  const fallback = safeName
     .replace(/[^\x20-\x7e]/g, '_')
-    .replace(/["\\]/g, '_');
-  const encoded = encodeURIComponent(name || 'document.pdf').replace(/['()*]/g, (char) =>
+    .replace(/["\\]/g, '_')
+    .slice(0, 150);
+  const encoded = encodeURIComponent(safeName).replace(/['()*]/g, (char) =>
     `%${char.charCodeAt(0).toString(16).toUpperCase()}`,
   );
   return `${download ? 'attachment' : 'inline'}; filename="${fallback}"; filename*=UTF-8''${encoded}`;
@@ -480,9 +674,25 @@ function securityHeaders(_req, res, next) {
   res.setHeader('X-Content-Type-Options', 'nosniff');
   res.setHeader('Referrer-Policy', 'no-referrer');
   res.setHeader('X-Frame-Options', 'DENY');
+  res.setHeader('X-DNS-Prefetch-Control', 'off');
+  res.setHeader('Origin-Agent-Cluster', '?1');
   res.setHeader(
     'Permissions-Policy',
-    'camera=(), microphone=(), geolocation=(), payment=(), usb=()',
+    [
+      'accelerometer=()',
+      'autoplay=()',
+      'browsing-topics=()',
+      'camera=()',
+      'display-capture=()',
+      'geolocation=()',
+      'gyroscope=()',
+      'interest-cohort=()',
+      'magnetometer=()',
+      'microphone=()',
+      'midi=()',
+      'payment=()',
+      'usb=()',
+    ].join(', '),
   );
   res.setHeader('Cross-Origin-Opener-Policy', 'same-origin');
   res.setHeader('Cross-Origin-Resource-Policy', 'same-origin');
@@ -504,6 +714,7 @@ function securityHeaders(_req, res, next) {
       "connect-src 'self'",
       "worker-src 'self' blob:",
       "media-src 'self' blob:",
+      "manifest-src 'self'",
       "frame-src 'self' blob:",
       "form-action 'self'",
     ].join('; '),
@@ -516,4 +727,18 @@ function clientAddress(req) {
   // configured hop count. Without it req.ip is the socket address, so a
   // client cannot spoof quotas by sending X-Forwarded-For.
   return req.ip || req.socket?.remoteAddress || 'unknown';
+}
+
+/**
+ * Log an untrusted open target without exposing URL query strings or local
+ * path components: URLs keep scheme/host/path, anything else keeps only the
+ * basename.
+ */
+function redactTarget(value) {
+  const text = String(value ?? '').slice(0, 1024);
+  try {
+    return redactUrl(new URL(text).href);
+  } catch {
+    return basename(text || '[empty]');
+  }
 }

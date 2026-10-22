@@ -6,6 +6,7 @@ import path from 'node:path';
 import test from 'node:test';
 
 import { createApp } from '../server/app.js';
+import { silentLogger } from '../server/logger.js';
 
 const WORK_DIR = path.resolve('test-output', `integration-${process.pid}`);
 const PDF_SIZE = 3 * 1024 * 1024 + 321;
@@ -508,7 +509,7 @@ test('returns a helpful error for unknown document sessions', async () => {
 /* ------------------------------------------------------------------ Helpers */
 
 async function startApp(options = {}) {
-  const created = createApp({ authToken: AUTH_TOKEN, ...options });
+  const created = createApp({ authToken: AUTH_TOKEN, logger: silentLogger(), ...options });
   const server = created.app.listen(0, '127.0.0.1');
   await once(server, 'listening');
 

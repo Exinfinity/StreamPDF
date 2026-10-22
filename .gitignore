@@ -1,8 +1,19 @@
 node_modules/
 .npm-cache/
 .cache/
+coverage/
 *.log
 .DS_Store
 test-output/
 .samples/
 test-pdf/
+
+# Local secrets / runtime state — never commit these (P3)
+.env
+.env.*
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
+.auth-token

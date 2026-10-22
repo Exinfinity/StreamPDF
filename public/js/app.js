@@ -942,12 +942,21 @@ async function loadOutline(pdf) {
 }
 
 function safeOutlineUrl(raw) {
-  if (typeof raw !== 'string') {
+  if (typeof raw !== 'string' || raw.length > 4096) {
     return null;
   }
   try {
     const url = new URL(raw, window.location.href);
+    // Only these schemes may leave the viewer. `javascript:`, `data:`,
+    // `file:`, `blob:` and custom protocol handlers are rejected, as are
+    // URLs with embedded credentials (phishing / credential leakage).
     if (!['http:', 'https:', 'mailto:'].includes(url.protocol)) {
+      return null;
+    }
+    if (url.username || url.password) {
+      return null;
+    }
+    if (url.protocol !== 'mailto:' && !url.hostname) {
       return null;
     }
     return url.href;

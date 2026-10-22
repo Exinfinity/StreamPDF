@@ -3,6 +3,10 @@ import { Readable } from 'node:stream';
 
 import { HttpError } from './errors.js';
 import {
+  sanitizeDisplayText,
+  sanitizeDocumentName,
+} from './filename.js';
+import {
   DEFAULT_REMOTE_POLICY,
   headerValue,
   parseRemoteUrl,
@@ -294,21 +298,17 @@ function extractRemoteName(headers, finalUrl) {
 }
 
 function sanitizeName(value) {
-  const cleaned = String(value)
-    .replace(/[\u0000-\u001f\u007f]/g, '')
-    .replace(/[\\/:*?"<>|]/g, '_')
-    .trim();
-  return cleaned || '未命名文档.pdf';
+  return sanitizeDocumentName(value);
 }
 
 function formatRemoteDisplay(url) {
   try {
-    // Host + pathname only (never query/fragment/userinfo). Strip control
-    // characters so remote metadata cannot inject terminal/log lines.
+    // Host + pathname only (never query/fragment/userinfo). Strip control and
+    // bidirectional characters so remote metadata cannot spoof logs or the UI.
     const display = `${url.host}${decodeURIComponent(url.pathname)}`;
-    return display.replace(/[\u0000-\u001f\u007f]/g, '').slice(0, 512);
+    return sanitizeDisplayText(display);
   } catch {
-    return url.host;
+    return sanitizeDisplayText(url.host);
   }
 }
 

@@ -144,12 +144,20 @@ export function isLoopbackHostname(value) {
   }
 }
 
-export function createHostGuard(value) {
+export function createHostGuard(value, logger) {
   const allowed = normalizeAllowedHosts(value);
 
   return function hostGuard(req, res, next) {
     const hostname = parseHostHeader(req.headers.host, req.rawHeaders);
     if (!hostname || (!allowed.has(hostname) && !isLoopbackHostname(hostname))) {
+      logger?.warn?.('host.rejected', {
+        requestId: req.id,
+        ip: req.ip || req.socket?.remoteAddress || 'unknown',
+        method: req.method,
+        path: req.path,
+        host: req.headers.host ?? null,
+        allowed: [...allowed, 'loopback'],
+      });
       res.setHeader('Cache-Control', 'no-store');
       res.status(421).type('text/plain; charset=utf-8').send('Misdirected Request');
       return;
