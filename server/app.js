@@ -54,10 +54,14 @@ export function createApp(options = {}) {
       ? DEFAULT_METRICS_LOG_INTERVAL_MS
       : Math.max(0, Number(options.metricsLogIntervalMs) || 0);
 
+  // Intranet deployment is the default: the URL proxy may reach private,
+  // loopback and CGNAT addresses (link-local/metadata stays blocked). Callers
+  // can opt into the old public-only policy with `allowPrivateAddresses:
+  // false` (or ALLOW_PRIVATE_ADDRESSES=0).
   const remotePolicy =
     options.remotePolicy ??
     createRemotePolicy({
-      allowPrivateAddresses: options.allowPrivateAddresses === true,
+      allowPrivateAddresses: options.allowPrivateAddresses !== false,
       allowedPorts: options.allowedRemotePorts ?? [80, 443],
     });
 

@@ -1,12 +1,14 @@
 # StreamPDF
 
-用 Node.js 作为后端、PDF.js 作为渲染引擎的流式 PDF 预览器。输入**公网 HTTP(S) PDF 直链**，即可在浏览器中按需加载、平滑浏览 GB 级 PDF。
+用 Node.js 作为后端、PDF.js 作为渲染引擎的流式 PDF 预览器。输入**内网、本机或公网 HTTP(S) PDF 直链**，即可在浏览器中按需加载、平滑浏览 GB 级 PDF。默认按**内网部署**设计，可以直接访问私网地址和宿主服务。
 
 ![Node.js](https://img.shields.io/badge/Node.js-%3E%3D22.13-2f8f5b)
 ![PDF.js](https://img.shields.io/badge/PDF.js-6.4-7c5cff)
 ![License](https://img.shields.io/badge/license-MIT-blue)
 
 > **安全模型变更**：服务器端本地文件读取（路径模式）已完全移除。StreamPDF 只通过 HTTP(S) 从远端加载 PDF，不再接受任何服务器文件路径。所有 `/api/*` 文档接口都需要 Bearer 访问令牌。
+>
+> **内网策略**：默认允许访问 RFC1918 私网、CGNAT、IPv6 ULA、回环/宿主地址以及任意端口，不再按公网部署限制目标地址。链路本地/云元数据、组播和保留地址仍然阻断。只有在需要面对公网时才设置 `ALLOW_PRIVATE_ADDRESSES=0` 恢复严格模式。
 
 ## 为什么大文件也能快速打开
 
@@ -57,10 +59,10 @@ http://127.0.0.1:3000
 
 页面会要求输入访问令牌。输入终端打印的令牌（或你设置的 `AUTH_TOKEN`）后：
 
-1. 粘贴 PDF 直链，例如 `https://example.com/files/manual.pdf`。
+1. 粘贴 PDF 直链，例如 `http://192.168.1.20:8080/files/manual.pdf` 或 `https://example.com/files/manual.pdf`。
 2. 回车或点击“打开文档”。
 
-> URL 由 **Node 服务端**请求，因此目标地址必须能从服务器访问，并且必须是公网 HTTP(S) 地址。本机、内网、链路本地和云元数据地址会被拒绝。
+> URL 由 **Node 服务端**请求，因此目标地址必须能从服务器访问。默认内网模式允许私网、本机和宿主服务地址（包括非 80/443 端口），只保留对链路本地/云元数据、组播和保留地址的阻断。
 
 ### 生成测试 PDF
 
@@ -110,7 +112,8 @@ node scripts/make-gb-sample-pdf.mjs test-output/huge.pdf 501 2048
 | `MAX_REMOTE_BYTES` | `2147483648`（2 GiB） | 单次内容响应的最大字节数（无 Range 的完整响应，或覆盖整个文件的单个 Range 请求）；超限中止连接 |
 | `DOCUMENT_TTL_MINUTES` | `30` | 文档会话闲置过期时间（分钟） |
 | `MAX_CONCURRENT_STREAMS` | `100` | 同时进行的内容流上限，超过返回 503 |
-| `ALLOWED_REMOTE_PORTS` | `80,443` | 允许访问的远端端口，逗号分隔 |
+| `ALLOWED_REMOTE_PORTS` | `80,443` | 公网严格模式下允许访问的远端端口，逗号分隔；内网模式不限制端口 |
+| `ALLOW_PRIVATE_ADDRESSES` | `1`（开启） | 默认内网模式：允许私网、CGNAT、IPv6 ULA、回环/宿主地址与任意端口。设为 `0` 恢复“仅公网地址 + 端口白名单”的严格模式 |
 | `TRUST_PROXY` | 空 | 设为 `1` 时信任一层反向代理的 `X-Forwarded-For`，用于按真实客户端 IP 计算配额/限流。仅在应用只接受可信代理连接时启用 |
 | `REMOTE_HEADERS_TIMEOUT_MS` | `20000` | 连接远端、等待响应头的超时 |
 | `REMOTE_BODY_IDLE_TIMEOUT_MS` | `30000` | 读取远端响应体时的空闲超时 |
@@ -126,18 +129,17 @@ node scripts/make-gb-sample-pdf.mjs test-output/huge.pdf 501 2048
 AUTH_TOKEN='a-very-long-random-token' \
 MAX_DOCUMENTS=50 \
 MAX_DOCUMENTS_PER_IP=3 \
-ALLOWED_REMOTE_PORTS=443 \
 PORT=8080 \
 npm start
 ```
 
-文档创建、内容读取和删除接口还有进程内每 IP 限流：创建默认 10 次/分钟、内容读取 600 次/分钟、删除 30 次/分钟。连续失败的认证尝试默认限制为 10 次/分钟。`MAX_CONCURRENT_STREAMS` 默认 100；浏览器通常每个源只并发数个请求，普通预览不会触及上限；如果使用非浏览器客户端并一次发起大量并发 Range 请求，可能收到 503，可按需调高。公网部署时仍建议在反向代理层再配置 `limit_req` / `limit_conn`。
+文档创建、内容读取和删除接口还有进程内每 IP 限流：创建默认 10 次/分钟、内容读取 600 次/分钟、删除 30 次/分钟。连续失败的认证尝试默认限制为 10 次/分钟。`MAX_CONCURRENT_STREAMS` 默认 100；浏览器通常每个源只并发数个请求，普通预览不会触及上限；如果使用非浏览器客户端并一次发起大量并发 Range 请求，可能收到 503，可按需调高。即使部署在内网，仍建议在反向代理层再配置 `limit_req` / `limit_conn`。
 
-如果需要通过域名从其他机器访问（或设置 `HOST=0.0.0.0`），必须同时设置 `ALLOWED_HOSTS`，并把反向代理的 `Host` 头原样传给 Node：
+如果需要通过内网域名或 IP 从其他机器访问（或设置 `HOST=0.0.0.0`），必须同时设置 `ALLOWED_HOSTS`，并把反向代理的 `Host` 头原样传给 Node：
 
 ```bash
 HOST=0.0.0.0 \
-ALLOWED_HOSTS='pdf.example.com,localhost' \
+ALLOWED_HOSTS='pdf.intra.example.com,192.168.1.10,localhost' \
 AUTH_TOKEN='a-very-long-random-token' \
 npm start
 ```
@@ -160,7 +162,8 @@ npm start
 - 返回 HTML 网页而不是 PDF 文件本身；
 - 强制压缩传输（`Content-Encoding: gzip` 等）的地址，字节范围语义不可靠；
 - 不支持 Range 的地址；
-- 本机、内网、链路本地、云元数据地址，以及非 80/443 端口（可通过 `ALLOWED_REMOTE_PORTS` 调整）。
+- 链路本地/云元数据、组播、保留地址，以及 IPv6 转换/隧道地址（NAT64、6to4、Teredo）；
+- 公网严格模式（`ALLOW_PRIVATE_ADDRESSES=0`）下的本机、内网地址和非 80/443 端口。
 
 加密 PDF 会在浏览器中弹出密码输入框；密码只在当前内存中的 PDF.js 实例里使用，不会发送给服务端。
 
@@ -176,8 +179,9 @@ npm audit --omit=dev --audit-level=high   # 生产依赖漏洞扫描（CI 也会
 
 - 未认证/错误令牌访问文档 API 返回 401；
 - 本地路径模式被拒绝（`LOCAL_FILES_DISABLED`）；
-- 回环、私网、链路本地、云元数据、IPv4 编码、IPv4-mapped IPv6、NAT64、6to4 等 SSRF 目标被拒绝；
-- 非 HTTP(S) 协议、URL 内嵌凭据、非白名单端口被拒绝；
+- 默认内网模式允许回环、私网、CGNAT、宿主服务与非标准端口；链路本地/云元数据、组播、保留地址仍被拒绝；
+- 公网严格模式（`ALLOW_PRIVATE_ADDRESSES=0`）下回环、私网、链路本地、云元数据、IPv4 编码、IPv4-mapped IPv6、NAT64、6to4 等 SSRF 目标被拒绝；
+- 非 HTTP(S) 协议、URL 内嵌凭据、严格模式下的非白名单端口被拒绝；
 - 重定向逐跳重新校验；
 - 远端 PDF 的精确 Range 响应、`206`、`416`、`HEAD`；
 - 不支持 Range 的远端被明确拒绝；
@@ -234,7 +238,7 @@ npm audit --omit=dev --audit-level=high   # 生产依赖漏洞扫描（CI 也会
 │   ├── make-sample-pdf.mjs     # 多页、带填充数据的普通测试文件
 │   └── make-gb-sample-pdf.mjs  # 稀疏写入的约 1 GB 流式测试文件
 ├── test/
-├── SECURITY.md          # 威胁模型、漏洞上报、公网部署清单
+├── SECURITY.md          # 威胁模型、漏洞上报、内网部署清单
 ├── SECURITY-AUDIT.md    # 审计报告与修复复核
 └── package.json
 ```
@@ -246,7 +250,7 @@ PDF.js 直接从 `node_modules/pdfjs-dist` 提供静态资源，由 `/vendor/pdf
 本轮修复覆盖 `SECURITY-AUDIT.md` 的 5 个 P0、3 个 P1，以及全部 P2/P3 加固项：
 
 1. **P0-1 本地文件读取（LFI）**：彻底移除 `source: "path"`、`PDF_ALLOWED_ROOTS`、本地文件探测与读取。服务端不再接受客户端提供的任何文件系统路径。
-2. **P0-2 SSRF**：只允许公网 HTTP(S) 地址；解析并校验全部 DNS 结果，拒绝回环/私网/链路本地/CGNAT/保留地址、IPv4-mapped IPv6、NAT64、6to4、Teredo；连接时 pin 住已校验 IP 防 DNS rebinding；手动处理最多 3 跳重定向并逐跳重新校验；禁止 URL 内嵌凭据；默认只允许 80/443；设置连接/响应头/响应体空闲超时。
+2. **P0-2 SSRF / 内网访问**：默认内网模式（`ALLOW_PRIVATE_ADDRESSES=1`）允许访问公网、RFC1918 私网、CGNAT、IPv6 ULA、回环/宿主地址及任意端口，满足内网部署需求；链路本地/云元数据、组播和保留地址仍然拒绝。连接时 pin 住已解析 IP 防 DNS rebinding；手动处理最多 3 跳重定向并逐跳重新校验；禁止 URL 内嵌凭据；设置连接/响应头/响应体空闲超时。设置 `ALLOW_PRIVATE_ADDRESSES=0` 可恢复原“仅公网地址 + 80/443”严格模式。
 3. **P0-3 无认证**：所有文档接口（包括 `/api/config`、内容、统计、删除）都要求 Bearer 令牌；令牌用 `timingSafeEqual` 比较；`/api/health` 只返回 `{ ok: true }`。令牌通过 `Authorization` 头传递，不放在 URL 或 Cookie 中。
 4. **P0-4 PDF.js 漏洞**：升级到 `pdfjs-dist@^6.4.299`（高于修复版本 `6.2.108`），显式关闭 `enableScripting` 和 XFA，保留严格 CSP，内容响应加 `sandbox` CSP。
 5. **P0-5 资源耗尽**：文档总数、每 IP 文档数、并发流、上游超时、完整响应大小、创建/内容/删除请求速率均有上限；文档 TTL 默认缩短到 30 分钟；不再有临时镜像磁盘写入。
@@ -262,13 +266,13 @@ PDF.js 直接从 `node_modules/pdfjs-dist` 提供静态资源，由 `/vendor/pdf
 
 部署建议：
 
-- 保持 `HOST=127.0.0.1`，前面使用 nginx/Caddy 终止 TLS 并做认证/限流；如必须绑定非回环地址，设置 `ALLOWED_HOSTS` 与 `AUTH_TOKEN`，且让代理传递原始 `Host`。
+- 内网部署可保持 `HOST=127.0.0.1` 并在前面放反向代理，或设置 `HOST=0.0.0.0` + `ALLOWED_HOSTS` + `AUTH_TOKEN` 直接在内网监听；让代理传递原始 `Host`。
 - 始终设置强随机 `AUTH_TOKEN`，不要通过 URL 传递令牌；生产环境不要依赖自动生成的随机令牌。
-- 在主机/容器/防火墙层限制出站流量，禁止到 RFC1918、`169.254.0.0/16`、本机的出站访问。
-- 不要为了访问内网 PDF 而放宽 SSRF 校验；本项目按“只允许公网 URL”设计。
+- 默认策略已经允许访问私网和宿主服务；如需进一步限制可达网段，请在主机/容器/防火墙层按需配置，而不是依赖应用层。
+- 只有在实例可能被不受信客户端访问时才设置 `ALLOW_PRIVATE_ADDRESSES=0`，恢复公网严格模式。
 - 使用 [deploy/streampdf.service](deploy/streampdf.service)、[deploy/nginx.conf](deploy/nginx.conf)、[deploy/docker-compose.yml](deploy/docker-compose.yml) 作为加固起点。
 - 监控 401/429/5xx、文档数、活动连接、上游失败率；可开启 `ENABLE_METRICS=1` 或采集 JSON 日志中的 `metrics.snapshot`。
-- 完整威胁模型、漏洞上报方式和公网部署清单见 [SECURITY.md](SECURITY.md)。
+- 完整威胁模型、漏洞上报方式和内网部署清单见 [SECURITY.md](SECURITY.md)。
 
 
 ## 已知限制

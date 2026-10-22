@@ -3,8 +3,10 @@ import test from 'node:test';
 
 import {
   createRemotePolicy,
+  isIntranetAddress,
   isPublicAddress,
   parseRemoteUrl,
+  resolveRemoteAddress,
 } from '../server/http-client.js';
 import { HttpError } from '../server/errors.js';
 
@@ -54,8 +56,41 @@ test('isPublicAddress accepts only globally routable unicast addresses', () => {
   assert.equal(isPublicAddress('not-an-ip'), false);
 });
 
-test('parseRemoteUrl rejects credentials, bad schemes and disallowed ports', () => {
-  const policy = createRemotePolicy({ allowedPorts: [80, 443] });
+test('intranet mode allows private/loopback addresses and any port by default', async () => {
+  const policy = createRemotePolicy();
+  assert.equal(policy.allowPrivateAddresses, true);
+
+  const url = parseRemoteUrl('http://192.168.1.20:8080/book.pdf', policy);
+  assert.equal(url.hostname, '192.168.1.20');
+  assert.equal(url.port, '8080');
+
+  for (const address of ['127.0.0.1', '192.168.1.20', '10.0.0.5', '::1']) {
+    const resolved = await resolveRemoteAddress(address, policy);
+    assert.equal(resolved.address, address);
+  }
+  assert.equal(parseRemoteUrl('http://localhost:3000/book.pdf', policy).port, '3000');
+
+  // Only intranet/host access is relaxed: link-local, cloud metadata,
+  // multicast and transition/reserved ranges stay blocked.
+  for (const address of [
+    '169.254.169.254',
+    '100.100.100.200',
+    'fe80::1',
+    '224.0.0.1',
+    '0.0.0.0',
+    '64:ff9b::7f00:1',
+    '2002:7f00:1::',
+  ]) {
+    assert.equal(isIntranetAddress(address), false, address);
+  }
+  await assert.rejects(
+    () => resolveRemoteAddress('169.254.169.254', policy),
+    (error) => error instanceof HttpError && error.code === 'REMOTE_ADDRESS_BLOCKED',
+  );
+});
+
+test('public-only mode rejects credentials, bad schemes and disallowed ports', () => {
+  const policy = createRemotePolicy({ allowPrivateAddresses: false, allowedPorts: [80, 443] });
 
   assert.equal(parseRemoteUrl('https://example.com/book.pdf', policy).host, 'example.com');
   assert.equal(parseRemoteUrl('http://example.com:80/book.pdf', policy).port, '');

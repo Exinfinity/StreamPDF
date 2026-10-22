@@ -231,7 +231,7 @@ test('metrics endpoint is opt-in, authenticated and non-cacheable', async () => 
 
     const failedOpen = await api(context, '/api/documents', {
       method: 'POST',
-      body: { source: 'url', value: 'http://127.0.0.1/blocked.pdf' },
+      body: { source: 'url', value: 'http://169.254.169.254/blocked.pdf' },
     });
     assert.equal(failedOpen.status, 403);
 
