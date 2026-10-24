@@ -30,18 +30,41 @@ services:
     mem_limit: 1g
     cpus: "2.0"
 
+    # Values come from the shell/.env, falling back to the README defaults.
+    # The container port is fixed at 3000 to match `ports` and `healthcheck`.
     environment:
       HOST: 0.0.0.0
       PORT: "3000"
       # Fail closed if the operator forgot to export the secrets.
       ALLOWED_HOSTS: "${ALLOWED_HOSTS:?set ALLOWED_HOSTS to the public/intranet hostname/IP}"
       AUTH_TOKEN: "${AUTH_TOKEN:?set AUTH_TOKEN to a long random value}"
-      TRUST_PROXY: "1"
-      ENABLE_HSTS: "1"
+
+      # Behind the TLS-terminating reverse proxy from deploy/nginx.conf.
+      TRUST_PROXY: ${TRUST_PROXY:-1}
+      ENABLE_HSTS: ${ENABLE_HSTS:-1}
+
+      # Only needed when a separate frontend origin calls the API.
+      # e.g. ALLOWED_ORIGINS=https://app.example.com
+      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-}
+
+      # Public-only strict mode by default (public addresses + 80/443 only).
+      # Set ALLOW_PRIVATE_ADDRESSES=1 only on a trusted intranet.
+      ALLOW_PRIVATE_ADDRESSES: ${ALLOW_PRIVATE_ADDRESSES:-0}
+      ALLOWED_REMOTE_PORTS: ${ALLOWED_REMOTE_PORTS:-80,443}
+
+      # Resource limits / timeouts (README defaults).
+      MAX_DOCUMENTS: ${MAX_DOCUMENTS:-100}
+      MAX_DOCUMENTS_PER_IP: ${MAX_DOCUMENTS_PER_IP:-5}
+      MAX_REMOTE_BYTES: ${MAX_REMOTE_BYTES:-2147483648}
+      DOCUMENT_TTL_MINUTES: ${DOCUMENT_TTL_MINUTES:-30}
+      MAX_CONCURRENT_STREAMS: ${MAX_CONCURRENT_STREAMS:-100}
+      REMOTE_HEADERS_TIMEOUT_MS: ${REMOTE_HEADERS_TIMEOUT_MS:-20000}
+      REMOTE_BODY_IDLE_TIMEOUT_MS: ${REMOTE_BODY_IDLE_TIMEOUT_MS:-30000}
+
+      # Observability: ENABLE_METRICS=1 opens the authenticated /api/metrics.
       LOG_LEVEL: ${LOG_LEVEL:-info}
       METRICS_LOG_INTERVAL_MINUTES: ${METRICS_LOG_INTERVAL_MINUTES:-15}
-      # ALLOWED_ORIGINS: https://app.example.com
-      # ENABLE_METRICS: "1"
+      ENABLE_METRICS: ${ENABLE_METRICS:-}
 
     ports:
       - "127.0.0.1:3000:3000"
