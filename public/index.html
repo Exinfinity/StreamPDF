@@ -2,14 +2,18 @@
 <html lang="zh-CN">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, viewport-fit=cover, interactive-widget=resizes-content"
+    />
     <meta name="color-scheme" content="light" />
     <meta name="theme-color" content="#ffffff" />
+    <meta name="format-detection" content="telephone=no" />
     <meta
       name="description"
-      content="StreamPDF —— 通过 HTTP Range 按需预览网络 PDF 文档。"
+      content="StreamPDF —— 通过 HTTP Range 按需阅读网络 PDF 文档。"
     />
-    <title>StreamPDF · 大文件流式预览</title>
+    <title>StreamPDF · 大文件流式阅读器</title>
     <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
     <link rel="stylesheet" href="/vendor/pdfjs/web/pdf_viewer.css" />
     <link rel="stylesheet" href="/styles.css" />
@@ -28,7 +32,7 @@
             </span>
             <span class="brand-copy">
               <strong>StreamPDF</strong>
-              <small>流式 PDF 预览</small>
+              <small>流式 PDF 阅读器</small>
             </span>
           </a>
         </div>
@@ -58,11 +62,14 @@
             <button class="icon-button" id="zoomIn" type="button" title="放大" aria-label="放大">
               <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14" /></svg>
             </button>
-            <button class="icon-button" id="fitWidth" type="button" title="适应宽度" aria-label="适应宽度">
+            <span class="tool-break" aria-hidden="true"></span>
+            <button class="icon-button tool-extra" id="fitWidth" type="button" title="适应宽度" aria-label="适应宽度">
               <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 8V4h4M20 8V4h-4M4 16v4h4M20 16v4h-4M8 12h8" /></svg>
+              <span class="btn-label" aria-hidden="true">适应宽度</span>
             </button>
-            <button class="icon-button" id="rotatePage" type="button" title="顺时针旋转" aria-label="顺时针旋转">
+            <button class="icon-button tool-extra" id="rotatePage" type="button" title="顺时针旋转" aria-label="顺时针旋转">
               <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11a8 8 0 1 0-2.3 6.3M20 4v7h-7" /></svg>
+              <span class="btn-label" aria-hidden="true">旋转</span>
             </button>
           </div>
 
@@ -78,7 +85,7 @@
           <button class="icon-button" id="authButton" type="button" title="访问令牌" aria-label="设置访问令牌">
             <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="10" width="14" height="10" rx="2" /><path d="M8.5 10V7.5a3.5 3.5 0 0 1 7 0V10M12 14v2" /></svg>
           </button>
-          <button class="icon-button sidebar-toggle" id="toggleSidebar" type="button" title="显示/隐藏侧栏" aria-label="显示/隐藏侧栏" hidden>
+          <button class="icon-button sidebar-toggle" id="toggleSidebar" type="button" title="显示/隐藏侧栏" aria-label="显示/隐藏侧栏" aria-controls="sidebar" aria-expanded="false" hidden>
             <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2" /><path d="M9 4v16" /></svg>
           </button>
           <button class="button button-primary" id="openButton" type="button" aria-label="打开文档">
@@ -91,6 +98,12 @@
       <main class="workspace">
         <aside class="sidebar" id="sidebar" aria-label="文档信息" hidden>
           <div class="sidebar-inner">
+            <div class="sidebar-mobile-head">
+              <h2>文档信息</h2>
+              <button class="icon-button" id="sidebarClose" type="button" aria-label="关闭文档信息面板">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18" /></svg>
+              </button>
+            </div>
             <section class="document-card">
               <div class="document-heading">
                 <span class="document-badge" aria-hidden="true">PDF</span>
@@ -140,6 +153,8 @@
           </div>
         </aside>
 
+        <div class="sidebar-scrim" id="sidebarScrim" aria-hidden="true"></div>
+
         <section class="stage">
           <div class="landing" id="landing">
             <div class="hero">
@@ -162,6 +177,8 @@
                         autocapitalize="off"
                         autocorrect="off"
                         spellcheck="false"
+                        inputmode="url"
+                        enterkeyhint="go"
                       />
                       <kbd class="field-enter" aria-hidden="true">Enter</kbd>
                     </div>
@@ -259,7 +276,6 @@
         <form class="auth-form" id="authForm" novalidate>
           <p class="auth-help">
             请输入服务启动时终端输出的访问令牌，或管理员通过 <code>AUTH_TOKEN</code> 配置的令牌。
-            令牌只保存在当前浏览器会话中。
           </p>
           <label class="auth-field">
             <span>访问令牌</span>
@@ -268,6 +284,7 @@
               type="password"
               autocomplete="current-password"
               spellcheck="false"
+              enterkeyhint="go"
               required
             />
           </label>

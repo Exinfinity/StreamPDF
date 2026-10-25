@@ -33,6 +33,8 @@ html,
 body {
   height: 100%;
   margin: 0;
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
 }
 
 body {
@@ -43,12 +45,14 @@ body {
   font-size: 14px;
   line-height: 1.5;
   -webkit-font-smoothing: antialiased;
+  -webkit-tap-highlight-color: transparent;
   text-rendering: optimizeLegibility;
 }
 
 button,
 input {
   font: inherit;
+  touch-action: manipulation;
 }
 
 button {
@@ -93,6 +97,7 @@ svg {
 /* ---------------------------------------------------------------- App shell */
 
 .app {
+  height: 100vh;
   height: 100dvh;
   display: flex;
   flex-direction: column;
@@ -207,6 +212,13 @@ svg {
   background: var(--line);
 }
 
+/* Desktop keeps the compact icon-only toolbar; the labels and the wrap marker
+   are only rendered by the mobile layout below. */
+.btn-label,
+.tool-break {
+  display: none;
+}
+
 .icon-button {
   width: 32px;
   height: 32px;
@@ -219,6 +231,8 @@ svg {
   background: transparent;
   color: var(--muted);
   cursor: pointer;
+  -webkit-user-select: none;
+  user-select: none;
   transition:
     color 140ms ease,
     background 140ms ease;
@@ -309,6 +323,8 @@ svg {
   font-weight: 600;
   font-variant-numeric: tabular-nums;
   cursor: pointer;
+  -webkit-user-select: none;
+  user-select: none;
 }
 
 .zoom-value:hover {
@@ -349,6 +365,8 @@ svg {
   font-weight: 600;
   white-space: nowrap;
   cursor: pointer;
+  -webkit-user-select: none;
+  user-select: none;
   transition:
     background 140ms ease,
     border-color 140ms ease,
@@ -433,12 +451,20 @@ svg {
   background: #fbfbfc;
 }
 
+/* The close affordance and the dimming scrim only exist in the slide-over
+   layout; on desktop the sidebar is part of the normal flow. */
+.sidebar-mobile-head,
+.sidebar-scrim {
+  display: none;
+}
+
 .sidebar-inner {
   height: 100%;
   padding: 18px 16px 14px;
   overflow-y: auto;
   display: flex;
   flex-direction: column;
+  overscroll-behavior: contain;
   scrollbar-width: thin;
   scrollbar-color: #d5d9e0 transparent;
 }
@@ -1546,6 +1572,11 @@ button.outline-item:hover {
   .stream-chip {
     display: none;
   }
+
+  /* The divider that used to separate the hidden stream chip. */
+  .toolbar > .tool-divider:nth-last-child(2) {
+    display: none;
+  }
 }
 
 @media (max-width: 1040px) {
@@ -1564,14 +1595,24 @@ button.outline-item:hover {
 }
 
 @media (max-width: 900px) {
+  body {
+    overscroll-behavior-y: none;
+  }
+
+  .topbar {
+    padding-right: max(20px, env(safe-area-inset-right));
+    padding-left: max(20px, env(safe-area-inset-left));
+  }
+
   .sidebar {
     position: fixed;
     top: var(--topbar-height);
     bottom: 0;
     left: 0;
     z-index: 50;
-    width: min(310px, 86vw);
+    width: min(324px, 88vw);
     flex-basis: auto;
+    padding-bottom: env(safe-area-inset-bottom);
     transform: translateX(-102%);
     transition: transform 200ms cubic-bezier(0.22, 1, 0.36, 1);
     box-shadow: 16px 0 40px -24px rgba(16, 24, 40, 0.3);
@@ -1587,6 +1628,79 @@ button.outline-item:hover {
 
   .app.sidebar-collapsed .sidebar {
     display: block;
+  }
+
+  .sidebar-inner {
+    -webkit-overflow-scrolling: touch;
+  }
+
+  .sidebar-mobile-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    margin-bottom: 12px;
+    padding: 0 2px 10px;
+    border-bottom: 1px solid var(--line);
+  }
+
+  .sidebar-mobile-head h2 {
+    margin: 0;
+    color: var(--muted);
+    font-size: 11px;
+    font-weight: 650;
+    letter-spacing: 0.02em;
+  }
+
+  .sidebar-mobile-head .icon-button {
+    width: 34px;
+    height: 34px;
+    border: 1px solid var(--line);
+    background: var(--bg);
+  }
+
+  .sidebar-scrim {
+    position: fixed;
+    top: var(--topbar-height);
+    right: 0;
+    bottom: 0;
+    left: 0;
+    z-index: 30;
+    background: rgba(17, 24, 39, 0.32);
+  }
+
+  .app.sidebar-visible .sidebar-scrim {
+    display: block;
+    animation: scrim-in 180ms ease-out;
+  }
+
+  .landing {
+    padding-right: env(safe-area-inset-right);
+    padding-left: env(safe-area-inset-left);
+  }
+
+  /* Keeping form fields at 16px prevents iOS Safari from zooming the whole
+     page when a field receives focus. */
+  .source-input,
+  .auth-field input {
+    font-size: 16px;
+  }
+
+  .page-field input {
+    width: 42px;
+    font-size: 16px;
+  }
+
+  .open-dialog {
+    max-height: calc(100dvh - 24px - env(safe-area-inset-bottom));
+  }
+
+  .dialog-panel {
+    max-height: calc(100dvh - 24px - env(safe-area-inset-bottom));
+  }
+
+  .toast {
+    right: max(14px, env(safe-area-inset-right));
   }
 
   .hero {
@@ -1609,12 +1723,14 @@ button.outline-item:hover {
 
 @media (max-width: 760px) {
   :root {
-    --topbar-height: 58px;
+    --topbar-height: calc(58px + env(safe-area-inset-top));
+    --mobile-control: 36px;
   }
 
   .topbar {
     grid-template-columns: minmax(0, 1fr) auto;
-    padding: 0 14px;
+    padding: env(safe-area-inset-top) max(14px, env(safe-area-inset-right)) 0
+      max(14px, env(safe-area-inset-left));
     background: var(--bg);
   }
 
@@ -1640,51 +1756,99 @@ button.outline-item:hover {
     font-size: 13.5px;
   }
 
+  /* Bottom control sheet. Every toolbar action stays reachable; the zoom group
+     wraps the view-level actions onto a second row on narrow screens. */
   .toolbar {
     position: fixed;
     left: 50%;
-    bottom: max(12px, env(safe-area-inset-bottom));
+    /* --keyboard-inset is published while the page field owns focus, so the
+       numeric keyboard on iOS does not cover the controls. */
+    bottom: calc(max(10px, env(safe-area-inset-bottom)) + var(--keyboard-inset, 0px));
     z-index: 60;
     transform: translateX(-50%);
-    gap: 6px;
-    max-width: calc(100vw - 20px);
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: center;
+    gap: 2px 3px;
+    width: max-content;
+    max-width: calc(100vw - 12px);
+    max-width: calc(
+      100vw - 12px - env(safe-area-inset-left) - env(safe-area-inset-right)
+    );
     padding: 5px;
     border: 1px solid var(--line);
-    border-radius: 10px;
+    border-radius: 12px;
     background: var(--bg);
-    box-shadow: 0 12px 32px -16px rgba(16, 24, 40, 0.3);
+    box-shadow: 0 12px 32px -16px rgba(16, 24, 40, 0.32);
   }
 
   .toolbar .tool-group {
-    height: 32px;
-    padding: 0;
-    border: 0;
-    background: transparent;
+    display: contents;
   }
 
   .toolbar .tool-divider,
-  .toolbar #fitWidth,
-  .toolbar #rotatePage,
   .toolbar .stream-chip {
     display: none;
   }
 
+  .toolbar .tool-break {
+    display: block;
+    flex: 1 0 100%;
+    width: 100%;
+    height: 0;
+    margin: 0;
+    padding: 0;
+  }
+
   .toolbar .icon-button {
-    width: 31px;
-    height: 31px;
+    width: var(--mobile-control);
+    height: var(--mobile-control);
+    border-radius: 8px;
   }
 
-  .page-field {
-    height: 31px;
+  .toolbar .page-field {
+    height: var(--mobile-control);
+    padding: 0 2px;
   }
 
-  .zoom-value {
-    min-width: 44px;
-    height: 31px;
+  .toolbar .page-field input {
+    width: 40px;
+  }
+
+  .toolbar .zoom-value {
+    min-width: 50px;
+    height: var(--mobile-control);
+    font-size: 12px;
+  }
+
+  .toolbar .btn-label {
+    display: inline;
+    color: var(--text-soft);
+    font-size: 12px;
+    font-weight: 600;
+    white-space: nowrap;
+  }
+
+  .toolbar .tool-extra {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 5px;
+    width: auto;
+    min-width: var(--mobile-control);
+    padding: 0 11px;
+  }
+
+  .toolbar .tool-extra svg {
+    width: 17px;
+    height: 17px;
   }
 
   .viewer-container {
-    --pdfViewer-padding-bottom: 100px;
+    --pdfViewer-padding-bottom: calc(
+      var(--mobile-toolbar-height, 84px) + 30px + env(safe-area-inset-bottom)
+    );
     --page-margin: 12px auto 10px;
   }
 
@@ -1693,13 +1857,18 @@ button.outline-item:hover {
   }
 
   .back-to-top {
-    right: 14px;
-    bottom: 72px;
+    right: max(12px, env(safe-area-inset-right));
+    bottom: calc(
+      max(10px, env(safe-area-inset-bottom)) + var(--mobile-toolbar-height, 84px) + 10px
+    );
+    height: 38px;
   }
 
   .toast {
-    right: 12px;
-    bottom: 70px;
+    right: max(12px, env(safe-area-inset-right));
+    bottom: calc(
+      max(10px, env(safe-area-inset-bottom)) + var(--mobile-toolbar-height, 84px) + 10px
+    );
   }
 
   .hero {
@@ -1741,6 +1910,11 @@ button.outline-item:hover {
 
   .open-dialog {
     width: calc(100vw - 20px);
+    max-width: 560px;
+  }
+
+  .auth-dialog {
+    max-width: 460px;
   }
 
   .dialog-panel {
@@ -1758,6 +1932,7 @@ button.outline-item:hover {
   }
 
   .button#openButton {
+    min-width: 40px;
     padding: 0 10px;
   }
 
@@ -1783,11 +1958,8 @@ button.outline-item:hover {
   }
 
   .open-hint {
+    gap: 4px;
     font-size: 10.5px;
-  }
-
-  .open-hint .hint-sep {
-    display: none;
   }
 
   .recent-item {
@@ -1798,16 +1970,201 @@ button.outline-item:hover {
     display: none;
   }
 
-  .toolbar {
-    gap: 2px;
+  .sidebar-mobile-head .icon-button {
+    width: 36px;
+    height: 36px;
+  }
+}
+
+@media (max-width: 380px) {
+  .toolbar .tool-extra {
+    padding: 0 8px;
   }
 
+  .toolbar .btn-label {
+    font-size: 11px;
+  }
+}
+
+/* Touch devices get larger hit areas without changing the desktop layout. */
+@media (hover: none) and (pointer: coarse) {
+  .icon-button {
+    width: 40px;
+    height: 40px;
+  }
+
+  .tool-group {
+    height: 44px;
+  }
+
+  .page-field {
+    height: 40px;
+  }
+
+  .zoom-value {
+    min-width: 52px;
+    height: 40px;
+  }
+
+  .sidebar-mobile-head .icon-button {
+    width: 40px;
+    height: 40px;
+  }
+
+  /* iOS zooms the whole page when a focused field is under 16px, regardless
+     of the viewport width (e.g. tablets outside the narrow breakpoint). */
+  .source-input,
+  .auth-field input,
   .page-field input {
-    width: 28px;
+    font-size: 16px;
   }
 
-  .toolbar .icon-button {
-    width: 29px;
+  .button {
+    height: 40px;
+  }
+
+  .dialog-close {
+    width: 40px;
+    height: 40px;
+  }
+
+  .back-to-top {
+    height: 40px;
+  }
+
+  .toast-close {
+    width: 32px;
+    height: 32px;
+  }
+
+  .clear-recent {
+    padding: 8px 0;
+  }
+
+  .recent-item {
+    padding-top: 10px;
+    padding-bottom: 10px;
+  }
+
+  .outline-item {
+    padding-top: 9px;
+    padding-bottom: 9px;
+  }
+}
+
+/* Touch tablets keep the toolbar in the top bar, where horizontal space is
+   tight: drop the brand caption and give the controls a bigger hit area. */
+@media (hover: none) and (pointer: coarse) and (max-width: 900px) {
+  .brand-copy {
+    display: none;
+  }
+
+  .topbar {
+    gap: 8px;
+  }
+
+  .toolbar {
+    gap: 6px;
+  }
+}
+
+/* Phones below 341px keep the 36px controls so the two toolbar rows never
+   turn into a third row. */
+@media (min-width: 341px) and (max-width: 760px) and (hover: none) and (pointer: coarse) {
+  :root {
+    --mobile-control: 40px;
+  }
+}
+
+/* Short landscape phones: collapse the control sheet back to a single row so
+   the document keeps most of the viewport height. */
+@media (max-width: 760px) and (max-height: 520px) and (orientation: landscape) {
+  :root {
+    --topbar-height: calc(52px + env(safe-area-inset-top));
+    --mobile-control: 32px;
+  }
+
+  .toolbar {
+    bottom: calc(max(6px, env(safe-area-inset-bottom)) + var(--keyboard-inset, 0px));
+    padding: 3px;
+    border-radius: 10px;
+  }
+
+  .toolbar .tool-break {
+    display: none;
+  }
+
+  .toolbar .btn-label {
+    display: none;
+  }
+
+  .toolbar .tool-extra {
+    padding: 0 6px;
+    gap: 0;
+  }
+
+  .toolbar .zoom-value {
+    min-width: 44px;
+  }
+
+  .viewer-container {
+    --pdfViewer-padding-bottom: calc(
+      var(--mobile-toolbar-height, 46px) + 16px + env(safe-area-inset-bottom)
+    );
+    --page-margin: 8px auto 8px;
+  }
+
+  .pdfViewer {
+    padding-top: 8px;
+  }
+
+  .back-to-top,
+  .toast {
+    bottom: calc(
+      max(6px, env(safe-area-inset-bottom)) + var(--mobile-toolbar-height, 46px) + 8px
+    );
+  }
+
+  .hero {
+    padding-top: 24px;
+  }
+
+  .feature-row {
+    padding-bottom: 28px;
+  }
+}
+
+/* Short landscape viewports keep the landing form within easy reach. */
+@media (max-width: 900px) and (max-height: 500px) {
+  .hero {
+    padding-top: 22px;
+  }
+
+  .hero h1 {
+    font-size: clamp(24px, 6vw, 30px);
+  }
+
+  .hero-lede {
+    margin-top: 8px;
+    font-size: 12.5px;
+  }
+
+  .open-panel {
+    margin-top: 16px;
+  }
+
+  .feature-row {
+    padding-top: 14px;
+    padding-bottom: 24px;
+  }
+}
+
+@keyframes scrim-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
   }
 }
 

@@ -23,6 +23,8 @@ const els = {
   viewer: document.getElementById('viewer'),
   toolbar: document.getElementById('toolbar'),
   sidebar: document.getElementById('sidebar'),
+  sidebarClose: document.getElementById('sidebarClose'),
+  sidebarScrim: document.getElementById('sidebarScrim'),
   openButton: document.getElementById('openButton'),
   authButton: document.getElementById('authButton'),
   toggleSidebar: document.getElementById('toggleSidebar'),
@@ -90,6 +92,10 @@ const state = {
   memoryToken: '',
 };
 
+const mobileSidebarQuery = window.matchMedia('(max-width: 900px)');
+const mobileToolbarQuery = window.matchMedia('(max-width: 760px)');
+const coarsePointerQuery = window.matchMedia('(hover: none) and (pointer: coarse)');
+
 const eventBus = new EventBus();
 const linkService = new PDFLinkService({
   eventBus,
@@ -119,11 +125,109 @@ function init() {
   renderRecent();
   bindViewerEvents();
   bindUiEvents();
+  syncSidebarToggle();
 
   if (getAuthToken()) {
     loadConfig();
   } else {
     window.setTimeout(() => showAuthDialog(), 0);
+  }
+}
+
+/* ------------------------------------------------------------- Layout state */
+
+function isMobileSidebar() {
+  return mobileSidebarQuery.matches;
+}
+
+function prefersTouchInput() {
+  return coarsePointerQuery.matches;
+}
+
+function syncSidebarToggle() {
+  const expanded = isMobileSidebar()
+    ? els.app.classList.contains('sidebar-visible')
+    : !els.app.classList.contains('sidebar-collapsed');
+  els.toggleSidebar.setAttribute('aria-expanded', String(expanded));
+}
+
+function closeSidebar({ focusToggle = false } = {}) {
+  els.app.classList.remove('sidebar-visible');
+  els.toggleSidebar.setAttribute('aria-expanded', 'false');
+  if (focusToggle) {
+    els.toggleSidebar.focus({ preventScroll: true });
+  }
+}
+
+/**
+ * Publish the rendered height of the floating mobile toolbar so the viewer,
+ * the back-to-top button and the toast can stay clear of it. The toolbar wraps
+ * onto two rows on narrow screens, so a fixed CSS value is not reliable.
+ */
+function updateMobileToolbarHeight() {
+  if (!mobileToolbarQuery.matches || els.toolbar.hidden) {
+    document.documentElement.style.removeProperty('--mobile-toolbar-height');
+    return;
+  }
+  const height = Math.ceil(els.toolbar.getBoundingClientRect().height);
+  if (height > 0) {
+    document.documentElement.style.setProperty('--mobile-toolbar-height', `${height}px`);
+  }
+}
+
+/**
+ * iOS keeps fixed elements anchored to the layout viewport while the software
+ * keyboard shrinks the visual viewport. While the page-number field is focused
+ * we lift the floating toolbar by the covered height so it stays usable.
+ * Chrome (interactive-widget=resizes-content) already shrinks the layout, in
+ * which case the computed inset is zero and nothing changes.
+ */
+function updateKeyboardInset() {
+  const viewport = window.visualViewport;
+  if (
+    !viewport ||
+    viewport.scale > 1.01 ||
+    !mobileToolbarQuery.matches ||
+    document.activeElement !== els.pageNumber
+  ) {
+    clearKeyboardInset();
+    return;
+  }
+  const inset = Math.round(window.innerHeight - viewport.height - viewport.offsetTop);
+  if (inset > 40) {
+    const value = `${inset}px`;
+    const root = document.documentElement;
+    if (root.style.getPropertyValue('--keyboard-inset') !== value) {
+      root.style.setProperty('--keyboard-inset', value);
+    }
+  } else {
+    clearKeyboardInset();
+  }
+}
+
+function clearKeyboardInset() {
+  const root = document.documentElement;
+  if (root.style.getPropertyValue('--keyboard-inset')) {
+    root.style.removeProperty('--keyboard-inset');
+  }
+}
+
+function handleSidebarBreakpointChange() {
+  if (!isMobileSidebar()) {
+    // Leaving the slide-over layout must not leave the panel "open" in a
+    // state that has no effect on desktop.
+    closeSidebar();
+  }
+  syncSidebarToggle();
+  updateMobileToolbarHeight();
+  updateKeyboardInset();
+}
+
+function onMediaChange(query, listener) {
+  if (typeof query.addEventListener === 'function') {
+    query.addEventListener('change', listener);
+  } else if (typeof query.addListener === 'function') {
+    query.addListener(listener);
   }
 }
 
@@ -243,7 +347,10 @@ function showAuthDialog(message = '') {
   if (!els.authDialog.open) {
     els.authDialog.showModal();
   }
-  window.setTimeout(() => els.authTokenInput.focus(), 30);
+  if (!prefersTouchInput()) {
+    // On touch devices focus would pop the software keyboard over the dialog.
+    window.setTimeout(() => els.authTokenInput.focus(), 30);
+  }
 }
 
 function showAuthError(message) {
@@ -453,15 +560,18 @@ function bindUiEvents() {
   });
 
   els.toggleSidebar.addEventListener('click', () => {
-    const mobile = window.matchMedia('(max-width: 900px)').matches;
-    if (mobile) {
+    if (isMobileSidebar()) {
       const visible = els.app.classList.toggle('sidebar-visible');
       els.toggleSidebar.setAttribute('aria-expanded', String(visible));
+      (visible ? els.sidebarClose : els.toggleSidebar).focus({ preventScroll: true });
     } else {
       const collapsed = els.app.classList.toggle('sidebar-collapsed');
       els.toggleSidebar.setAttribute('aria-expanded', String(!collapsed));
     }
   });
+
+  els.sidebarClose.addEventListener('click', () => closeSidebar({ focusToggle: true }));
+  els.sidebarScrim.addEventListener('click', () => closeSidebar({ focusToggle: true }));
 
   els.closeDocument.addEventListener('click', () => {
     closeDocument();
@@ -494,6 +604,8 @@ function bindUiEvents() {
       }
     }
   });
+  els.pageNumber.addEventListener('focus', updateKeyboardInset);
+  els.pageNumber.addEventListener('blur', clearKeyboardInset);
 
   els.zoomOut.addEventListener('click', () => zoomBy(1 / 1.18));
   els.zoomIn.addEventListener('click', () => zoomBy(1.18));
@@ -541,12 +653,30 @@ function bindUiEvents() {
       if (els.openDialog.open || els.authDialog.open) {
         return;
       }
-      if (window.matchMedia('(max-width: 900px)').matches) {
-        els.app.classList.remove('sidebar-visible');
-        els.toggleSidebar.setAttribute('aria-expanded', 'false');
+      if (isMobileSidebar() && els.app.classList.contains('sidebar-visible')) {
+        closeSidebar({ focusToggle: true });
       }
     }
   });
+
+  onMediaChange(mobileSidebarQuery, handleSidebarBreakpointChange);
+  onMediaChange(mobileToolbarQuery, updateMobileToolbarHeight);
+
+  if (typeof ResizeObserver === 'function') {
+    const toolbarObserver = new ResizeObserver(updateMobileToolbarHeight);
+    toolbarObserver.observe(els.toolbar);
+  }
+
+  window.addEventListener('resize', updateMobileToolbarHeight, { passive: true });
+  window.addEventListener('orientationchange', () => {
+    window.setTimeout(updateMobileToolbarHeight, 150);
+    window.setTimeout(updateKeyboardInset, 150);
+  });
+
+  if (window.visualViewport) {
+    window.visualViewport.addEventListener('resize', updateKeyboardInset, { passive: true });
+    window.visualViewport.addEventListener('scroll', updateKeyboardInset, { passive: true });
+  }
 
   window.addEventListener('beforeunload', () => {
     stopStatsPolling();
@@ -560,6 +690,11 @@ function focusLandingInput() {
     return;
   }
   els.landing.scrollTop = 0;
+  if (prefersTouchInput()) {
+    // Do not summon the on-screen keyboard (and its layout shift) on touch
+    // devices; the landing page is already scrolled to the form.
+    return;
+  }
   input.focus({ preventScroll: true });
   input.scrollIntoView({ block: 'center', behavior: 'smooth' });
 }
@@ -569,7 +704,9 @@ function openOpenDialog() {
     els.openDialog.showModal();
   }
   const panel = els.openDialogSlot.querySelector('.open-panel');
-  window.setTimeout(() => panel?.querySelector('.source-input')?.focus(), 40);
+  if (!prefersTouchInput()) {
+    window.setTimeout(() => panel?.querySelector('.source-input')?.focus(), 40);
+  }
 }
 
 function closeOpenDialog() {
@@ -897,9 +1034,8 @@ async function loadOutline(pdf) {
             active.classList.remove('is-current');
           }
           node.classList.add('is-current');
-          if (window.matchMedia('(max-width: 900px)').matches) {
-            els.app.classList.remove('sidebar-visible');
-            els.toggleSidebar.setAttribute('aria-expanded', 'false');
+          if (isMobileSidebar()) {
+            closeSidebar();
           }
           try {
             if (item.url) {
@@ -1008,7 +1144,9 @@ function showDocumentView(meta) {
   els.stageOverlay.hidden = true;
   els.viewerContainer.scrollTop = 0;
   els.app.classList.remove('sidebar-visible');
-  els.toggleSidebar.setAttribute('aria-expanded', String(!els.app.classList.contains('sidebar-collapsed')));
+  syncSidebarToggle();
+  updateMobileToolbarHeight();
+  clearKeyboardInset();
 }
 
 function showLandingView() {
@@ -1020,6 +1158,9 @@ function showLandingView() {
   els.backToTop.hidden = true;
   els.landing.scrollTop = 0;
   els.app.classList.remove('sidebar-visible');
+  syncSidebarToggle();
+  updateMobileToolbarHeight();
+  clearKeyboardInset();
   els.stageOverlay.hidden = true;
   document.title = 'StreamPDF · 大文件流式预览';
 }
