@@ -79,7 +79,9 @@ test('deployment templates apply host, container and proxy hardening (P3)', asyn
   assert.match(nginx, /proxy_set_header Host \$host/);
   assert.match(nginx, /Strict-Transport-Security/);
   assert.match(nginx, /upstream streampdf_upstream/);
-  assert.match(nginx, /include \/etc\/nginx\/conf\.d/);
+  // A site-level drop-in is installed into a vhost include directory, so it
+  // documents the conf.d destination instead of re-including that directory.
+  assert.match(nginx, /\/etc\/nginx\/conf\.d\/streampdf\.conf/);
 
   // deploy/nginx.conf must be a site-level drop-in that can live next to other
   // vhosts, never a replacement for the host's /etc/nginx/nginx.conf.
