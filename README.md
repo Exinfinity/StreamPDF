@@ -228,7 +228,8 @@ npm audit --omit=dev --audit-level=high   # 生产依赖漏洞扫描（CI 也会
 ├── deploy/
 │   ├── streampdf.service        # systemd 加固单元
 │   ├── streampdf.env.example    # 环境变量模板
-│   ├── nginx.conf               # TLS/限流/Host 传递参考配置
+│   ├── nginx.conf               # TLS/限流/Host 传递的站点级 drop-in 配置
+│   ├── nginx-http-redirect.conf # 可选的 80 -> 443 跳转 drop-in
 │   ├── Dockerfile               # 非 root、只读运行时镜像
 │   └── docker-compose.yml       # cap_drop/read_only/资源限制
 ├── .github/
@@ -270,7 +271,7 @@ PDF.js 直接从 `node_modules/pdfjs-dist` 提供静态资源，由 `/vendor/pdf
 - 始终设置强随机 `AUTH_TOKEN`，不要通过 URL 传递令牌；生产环境不要依赖自动生成的随机令牌。
 - 默认策略只允许公网目标；如部署在可信内网且必须访问私网/宿主 PDF 源，显式设置 `ALLOW_PRIVATE_ADDRESSES=1`，并配合网络层访问控制。
 - 在主机/容器/防火墙层按需限制出站流量；应用层地址策略不能替代网络层控制。
-- 使用 [deploy/streampdf.service](deploy/streampdf.service)、[deploy/nginx.conf](deploy/nginx.conf)、[deploy/docker-compose.yml](deploy/docker-compose.yml) 作为加固起点。
+- 使用 [deploy/streampdf.service](deploy/streampdf.service)、[deploy/nginx.conf](deploy/nginx.conf)、[deploy/docker-compose.yml](deploy/docker-compose.yml) 作为加固起点。[deploy/nginx.conf](deploy/nginx.conf) 是站点级 drop-in：放进 `conf.d`（或 Debian 系的 `sites-available`/`sites-enabled`）即可与同机其它站点共存；需要 80 -> 443 跳转时再加 [deploy/nginx-http-redirect.conf](deploy/nginx-http-redirect.conf)。
 - 监控 401/429/5xx、文档数、活动连接、上游失败率；可开启 `ENABLE_METRICS=1` 或采集 JSON 日志中的 `metrics.snapshot`。
 - 完整威胁模型、漏洞上报方式和公网部署清单见 [SECURITY.md](SECURITY.md)。
 

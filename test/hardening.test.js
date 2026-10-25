@@ -78,6 +78,20 @@ test('deployment templates apply host, container and proxy hardening (P3)', asyn
   assert.match(nginx, /client_max_body_size/);
   assert.match(nginx, /proxy_set_header Host \$host/);
   assert.match(nginx, /Strict-Transport-Security/);
+  assert.match(nginx, /upstream streampdf_upstream/);
+  assert.match(nginx, /include \/etc\/nginx\/conf\.d/);
+
+  // deploy/nginx.conf must be a site-level drop-in that can live next to other
+  // vhosts, never a replacement for the host's /etc/nginx/nginx.conf.
+  const nginxDirectives = nginx.replace(/^\s*#.*$/gm, '');
+  assert.doesNotMatch(nginxDirectives, /^\s*worker_processes\b/m);
+  assert.doesNotMatch(nginxDirectives, /^\s*events\s*\{/m);
+  assert.doesNotMatch(nginxDirectives, /^\s*http\s*\{/m);
+
+  // The port 80 redirect is optional and shipped separately.
+  const redirect = await read('deploy/nginx-http-redirect.conf');
+  assert.match(redirect, /listen 80;/);
+  assert.match(redirect, /return 301 https:\/\/\$host\$request_uri;/);
 
   const dockerfile = await read('deploy/Dockerfile');
   assert.match(dockerfile, /USER node/);
