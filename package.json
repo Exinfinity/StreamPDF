@@ -26,6 +26,6 @@
   "dependencies": {
     "express": "^5.3.0",
     "ipaddr.js": "^2.5.0",
-    "pdfjs-dist": "^6.4.299"
+    "pdfjs-dist": "^6.5.438"
   }
 }
